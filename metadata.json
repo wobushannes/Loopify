@@ -1,0 +1,6 @@
+{
+  "name": "Seamless Video Looper and Audio Overlay",
+  "description": "An interactive utility to crop visual areas of videos, extract soundtracks, and seamlessly loop trimmed segments perfectly synced to the audio duration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
