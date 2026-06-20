@@ -389,6 +389,82 @@ app.post("/api/compress", async (req: any, res) => {
   }
 });
 
+// Audio Separation API Endpoint (Stimm-Extraktor)
+app.post("/api/split-audio", async (req: any, res) => {
+  const { audioFullPath, startTime, endTime } = req.body;
+
+  if (!audioFullPath || !fs.existsSync(audioFullPath)) {
+    return res.status(400).json({ success: false, error: "Audiodatei zur Trennung wurde auf dem Server nicht gefunden." });
+  }
+
+  const taskId = Date.now();
+  const vocalOutPath = path.join(OUTPUTS_DIR, `vocal-${taskId}.mp3`);
+  const instrumentalOutPath = path.join(OUTPUTS_DIR, `instrumental-${taskId}.mp3`);
+
+  let trimInputPrefix = "";
+  if (startTime !== undefined && endTime !== undefined) {
+    const startNum = parseFloat(startTime);
+    const endNum = parseFloat(endTime);
+    if (!isNaN(startNum) && !isNaN(endNum) && startNum >= 0 && endNum > startNum) {
+      trimInputPrefix = `-ss ${startNum} -to ${endNum}`;
+    }
+  }
+
+  try {
+    console.log(`Starting audio separation on ${audioFullPath} (trim: ${startTime}s - ${endTime}s)`);
+
+    // 1. EXTRACT INSTRUMENTAL
+    // Subtrahiert den Mono-Anteil (Meist Gesang im Center) und erhält den Bass-Bereich (<180Hz) unberührt für ein sattes Instrumental.
+    const instrumentalFilter = "[0:a]asplit=2[low][high];[low]lowpass=f=180[low_mono];[high]highpass=f=180,pan=mono|c0=c0-c1[high_cancel];[low_mono][high_cancel]amix=inputs=2:weights=1.2 1.5";
+    const instCmd = `"${ffmpegCmd}" -y ${trimInputPrefix} -i "${audioFullPath}" -filter_complex "${instrumentalFilter}" -c:a libmp3lame -q:a 2 "${instrumentalOutPath}"`;
+
+    await new Promise<void>((resolve, reject) => {
+      exec(instCmd, (err, stdout, stderr) => {
+        if (err) {
+          console.error("Instrumental-Extraktion fehlgeschlagen:", stderr);
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
+    });
+
+    // 2. EXTRACT VOCALS
+    // Mischt Left+Right zu Mono, filtert tiefe Frequenzen (<200Hz) und hohe Frequenzen (>3000Hz) heraus,
+    // um die Musikbegleitung an den Rändern des Frequenzspektrums abzudämpfen.
+    // Ein EQ hebt die charakteristische Gesangspräsenz an, während das agate-Filter (Audio Gate)
+    // Hintergrundgeräusche und leise Instrumentenpassagen in Gesangspausen automatisch stummschaltet.
+    const vocalFilter = "[0:a]pan=mono|c0=0.5*c0+0.5*c1,highpass=f=200,lowpass=f=3000,equalizer=f=1000:width_type=q:width=1.0:g=4,equalizer=f=2500:width_type=q:width=1.0:g=3.5,agate=threshold=0.05:ratio=5.0:attack=15:release=150:makeup=1.2";
+    const vocalCmd = `"${ffmpegCmd}" -y ${trimInputPrefix} -i "${audioFullPath}" -filter_complex "${vocalFilter}" -c:a libmp3lame -q:a 2 "${vocalOutPath}"`;
+
+    await new Promise<void>((resolve, reject) => {
+      exec(vocalCmd, (err, stdout, stderr) => {
+        if (err) {
+          console.error("Vocal-Extraktion fehlgeschlagen:", stderr);
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
+    });
+
+    res.json({
+      success: true,
+      vocalUrl: `/outputs/vocal-${taskId}.mp3`,
+      instrumentalUrl: `/outputs/instrumental-${taskId}.mp3`,
+    });
+
+  } catch (err: any) {
+    console.error("Audio splitter processing error:", err);
+    [vocalOutPath, instrumentalOutPath].forEach(p => {
+      if (fs.existsSync(p)) {
+        try { fs.unlinkSync(p); } catch (e) {}
+      }
+    });
+    res.status(500).json({ success: false, error: err.message || "Fehler bei der Frequenzttrennung des Audios." });
+  }
+});
+
 // Start backend server
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {

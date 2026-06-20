@@ -22,6 +22,16 @@ Die Anwendung löst im Detail vier zentrale Medienverarbeitungsschritte:
    * Damit der Videoschnitt nicht sichtbar ist (keine harten Schnitte oder Sprünge bei der Aneinanderreihung), nutzt die App das **Ping-Pong-Modell**.
    * FFmpeg spiegelt das zugeschnittene Segment und fügt es abwechselnd vorwärts und rückwärts zusammen (`[0:v][1:v]concat=n=2`). Dadurch gleiten Anfang und Ende des Loops nahtlos ineinander über.
 
+5. **Professionelle Videokompression & Stapelverarbeitung (Queue):**
+   * **Starke Speicherreduktion:** Komprimiere riesige GB-Dateien drastisch via Constant Rate Factor (CRF 20/26/32) und intelligentem Downscaling (1080p Full HD, 720p HD, 480p).
+   * **Stapelverarbeitung (Queue-Modus):** Lade mehrere Videos gleichzeitig hoch, die vollautomatisch und nacheinander im Hintergrund sequentiell verarbeitet werden.
+   * **Eigene Kompressions-Presets:** Speichere häufig verwendete Einstellungen mit individuellem Namen ab (per `localStorage`), um sie für wiederkehrende Workflows mit nur einem Klick abzurufen.
+
+6. **Echtzeit-Stimm-Extraktor (Vocals & Instrumental Splitter):**
+   * **Acapella Isolierung (Reine Stimme):** Filtert Frequenzen außerhalb des Bereichs der menschlichen Stimme (Butterworth-Bandpassfilter von 220Hz bis 3400Hz) heraus, um ein erstaunlich klares Vocals-Isolat zu erzeugen.
+   * **Begleitmusik (Instrumental / Karaoke):** Wendet eine Mono-Phasen-Matrix (Subtraktion der L/R-Kanäle) an, um perfekt zentrierten Gesang auszulöschen, während tiefe Bassbereiche (<180Hz) unberührt bleiben, um kraftvolle Trommeln & Bässe beizubehalten.
+   * **Integrierter Audio-Player:** Ermöglicht das direkte Vorhören der extrahierten Tonspuren direkt im Browser vor dem eigentlichen Download.
+
 ---
 
 ## 🛠️ Technische Architektur
@@ -88,6 +98,22 @@ Wenn du im Dashboard auf **"Mischung starten"** drückst, laufen im Hintergrund 
 5. **Multi-Looping und Audio Overlay:**
    ```bash
    ffmpeg -y -stream_loop LOOPS_NEEDED -i "einheit.mp4" -i "output_audio.mp3" -map 0:v -map 1:a -c:v libx264 -pix_fmt yuv420p -shortest -t AUDIO_DURATION "endergebnis.mp4"
+   ```
+
+6. **Video-Kompression (mit optionalem Downscaling und CRF):**
+   ```bash
+   # Crf presets: low = 20, medium = 26, high = 32
+   # Scale filters: 1080p -> -vf "scale=1920:trunc(ih*1920/iw/2)*2"
+   ffmpeg -y -i "eingabe.mp4" -c:v libx264 -crf CRF_WERT -vf "scale=BREITE:-2" -c:a aac -b:a 128k "ausgabe.mp4"
+   ```
+
+7. **Lied-Spurseparation (Gesangs- und Instrumentalextraktion):**
+   ```bash
+   # 7.1 Extrahiere Instrumental (Mono-Stimmunterdrückung & Bass-Bypass):
+   ffmpeg -y -i "lied.mp3" -filter_complex "[0:a]asplit=2[low][high];[low]lowpass=f=180[low_mono];[high]highpass=f=180,pan=mono|c0=c0-c1[high_cancel];[low_mono][high_cancel]amix=inputs=2:weights=1.2 1.5" -c:a libmp3lame -q:a 2 "instrumental.mp3"
+
+   # 7.2 Extrahiere Gesang / Vocals (Standard-Kombinationsfilter, Präsenz-EQ & Gate):
+   ffmpeg -y -i "lied.mp3" -filter_complex "[0:a]pan=mono|c0=0.5*c0+0.5*c1,highpass=f=200,lowpass=f=3000,equalizer=f=1000:width_type=q:width=1.0:g=4,equalizer=f=2500:width_type=q:width=1.0:g=3.5,agate=threshold=0.05:ratio=5.0:attack=15:release=150:makeup=1.2" -c:a libmp3lame -q:a 2 "vocals.mp3"
    ```
 
 Viel Spaß beim Erstellen von reibungslosen, rhythmischen Kinographien! 🎬✨
