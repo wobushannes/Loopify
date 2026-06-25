@@ -25,7 +25,9 @@ import {
   Play,
   CheckCircle2,
   Clock,
-  Loader2
+  Loader2,
+  ArrowUp,
+  ArrowDown
 } from "lucide-react";
 import { UploadedFile, CropSelection, TrimSelection, LoopMode, QueueItem, CompressionPreset } from "./types";
 import MediaUploader from "./components/MediaUploader";
@@ -33,7 +35,7 @@ import VideoCropTrim from "./components/VideoCropTrim";
 
 export default function App() {
   // Navigation: Active main Workspace tab
-  const [activeTab, setActiveTab] = useState<"mixer" | "compressor" | "splitter">("mixer");
+  const [activeTab, setActiveTab] = useState<"mixer" | "compressor" | "splitter" | "concat">("mixer");
 
   // State: Uploaded media files
   const [videoFile, setVideoFile] = useState<UploadedFile | undefined>(undefined);
@@ -50,6 +52,14 @@ export default function App() {
   } | null>(null);
   const [splitterTrim, setSplitterTrim] = useState<{ startTime: number; endTime: number }>({ startTime: 0, endTime: 30 });
   const [enableSplitterTrim, setEnableSplitterTrim] = useState(false);
+
+  // State: Video Concatenation (Merger)
+  const [concatVideos, setConcatVideos] = useState<UploadedFile[]>([]);
+  const [isConcatUploading, setIsConcatUploading] = useState(false);
+  const [isConcating, setIsConcating] = useState(false);
+  const [concatResultUrl, setConcatResultUrl] = useState<string>("");
+  const [concatResultMeta, setConcatResultMeta] = useState<any | null>(null);
+  const concatInputRef = useRef<HTMLInputElement>(null);
 
   // Mixer parameters
   const [cropConfig, setCropConfig] = useState<CropSelection>({ x: 0, y: 0, width: 200, height: 200 });
@@ -533,6 +543,136 @@ export default function App() {
     }
   };
 
+  // Video Concatenation Handlers (Video-Verkettung)
+  const handleConcatVideoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    setIsConcatUploading(true);
+    setProcessError("");
+
+    const uploadedFilesList: UploadedFile[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const formData = new FormData();
+      formData.append("videoFile", file);
+
+      try {
+        const response = await fetch("/api/upload", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await response.json();
+        if (data.success && data.files.video) {
+          uploadedFilesList.push(data.files.video);
+        } else {
+          setProcessError(prev => prev || (data.error || `Fehler beim Hochladen von: ${file.name}`));
+        }
+      } catch (err: any) {
+        console.error(err);
+        setProcessError("Verbindung zum Server fehlgeschlagen beim Hochladen.");
+      }
+    }
+
+    if (uploadedFilesList.length > 0) {
+      setConcatVideos(prev => [...prev, ...uploadedFilesList]);
+    }
+    setIsConcatUploading(false);
+    if (concatInputRef.current) {
+      concatInputRef.current.value = "";
+    }
+  };
+
+  const handleTriggerConcatenation = async () => {
+    if (concatVideos.length < 2) {
+      setProcessError("Bitte füge mindestens zwei Videos hinzu, um sie zu verketten.");
+      return;
+    }
+
+    setIsConcating(true);
+    setProcessError("");
+    setConcatResultUrl("");
+    setConcatResultMeta(null);
+    setProcessingTimeSec(0);
+
+    const timerId = setInterval(() => {
+      setProcessingTimeSec(prev => prev + 1);
+    }, 1000);
+
+    const statusSequence = [
+      { text: "Lese Video-Clips ein...", delay: 100 },
+      { text: "Analysiere Auflösungen und Tonspuren...", delay: 1500 },
+      { text: "Starte Normalisierung auf einheitliche Spezifikationen (1280x720, 30fps)...", delay: 3000 },
+      { text: "Rendere Briefkasten-Ränder (Letterboxing) für abweichende Formate...", delay: 5000 },
+      { text: "Erstelle stumme Tonspuren für stumme Videoclips...", delay: 7500 },
+      { text: "Füge normalisierte Clips in die Verkettungs-Matrix ein...", delay: 10000 },
+      { text: "Führe Frame-Genaue Zusammenfügung (Concat Demuxer) aus...", delay: 13000 },
+      { text: "Schreibe fertiges Zielvideo in den Speicher...", delay: 16000 },
+    ];
+
+    setProcessStatus(statusSequence[0].text);
+
+    const statusTimers = statusSequence.map(seq => {
+      return setTimeout(() => {
+        setProcessStatus(seq.text);
+      }, seq.delay);
+    });
+
+    try {
+      const response = await fetch("/api/concat-videos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          videoPaths: concatVideos.map(v => v.fullPath)
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setConcatResultUrl(data.videoUrl);
+        setConcatResultMeta(data.meta);
+      } else {
+        setProcessError(data.error || "Fehler beim Verketten der Videos.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setProcessError("Unerwarteter Verbindungsausfall.");
+    } finally {
+      setIsConcating(false);
+      clearInterval(timerId);
+      statusTimers.forEach(clearTimeout);
+      setProcessingTimeSec(0);
+      setProcessStatus("");
+    }
+  };
+
+  const moveClipUp = (index: number) => {
+    if (index === 0) return;
+    setConcatVideos(prev => {
+      const next = [...prev];
+      const temp = next[index];
+      next[index] = next[index - 1];
+      next[index - 1] = temp;
+      return next;
+    });
+  };
+
+  const moveClipDown = (index: number) => {
+    if (index === concatVideos.length - 1) return;
+    setConcatVideos(prev => {
+      const next = [...prev];
+      const temp = next[index];
+      next[index] = next[index + 1];
+      next[index + 1] = temp;
+      return next;
+    });
+  };
+
+  const removeClip = (index: number) => {
+    setConcatVideos(prev => prev.filter((_, i) => i !== index));
+  };
+
   // Reset helper
   const handleFullReset = () => {
     setVideoFile(undefined);
@@ -549,6 +689,11 @@ export default function App() {
     setIsSplitterUploading(false);
     setSplitterTrim({ startTime: 0, endTime: 30 });
     setEnableSplitterTrim(false);
+    setConcatVideos([]);
+    setConcatResultUrl("");
+    setConcatResultMeta(null);
+    setIsConcating(false);
+    setIsConcatUploading(false);
     setProcessError("");
   };
 
@@ -620,6 +765,19 @@ export default function App() {
                 }`}
               >
                 🎤 Stimm-Extraktor
+              </button>
+              <button
+                onClick={() => {
+                  setActiveTab("concat");
+                  setProcessError("");
+                }}
+                className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
+                  activeTab === "concat"
+                    ? "bg-white text-gray-900 shadow-xs"
+                    : "text-gray-500 hover:text-gray-900"
+                }`}
+              >
+                🔗 Video-Verkettung
               </button>
             </div>
 
@@ -1894,6 +2052,312 @@ export default function App() {
 
                 </div>
 
+              </div>
+
+            </div>
+          </>
+        )}
+
+        {/* VIDEO-VERKETTUNG WORKSPACE */}
+        {activeTab === "concat" && (
+          <>
+            {/* INTRO BANNER */}
+            <section className="bg-gradient-to-r from-slate-900 to-emerald-950 rounded-2xl text-white p-7 md:p-8 shadow-sm relative overflow-hidden">
+              <div className="absolute right-0 bottom-0 top-0 w-1/3 opacity-15 pointer-events-none flex items-center justify-center">
+                <Sparkles className="w-44 h-44 text-emerald-400" />
+              </div>
+              <div className="relative max-w-2xl space-y-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-emerald-200 bg-emerald-800/45 px-3 py-1 rounded-sm">
+                  Präzisions-Zusammenfügung & Normalisierung
+                </span>
+                <h2 className="font-display font-semibold text-2xl tracking-tight md:text-3xl text-white mt-1">
+                  Videos nahtlos verketten
+                </h2>
+                <p className="text-sm text-emerald-200 leading-relaxed max-w-xl">
+                  Lade mehrere Video-Clips hoch, ordne sie in deiner gewünschten Reihenfolge an und verkettere sie zu einem einzigen, perfekt normalisierten Zielvideo. Abweichende Formate werden automatisch ausgeglichen.
+                </p>
+              </div>
+            </section>
+
+            {/* ERROR DISPLAY */}
+            {processError && (
+              <div className="p-4 bg-red-50 border border-red-100 rounded-xl text-red-800 text-xs flex items-center gap-2.5 animate-bounce">
+                <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+                <div className="font-medium">{processError}</div>
+              </div>
+            )}
+
+            {/* CONCAT PIPELINE COLUMNS */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+              
+              {/* Left Column: Upload and Playlist Panel */}
+              <div className="lg:col-span-8 space-y-8">
+                
+                {/* 1. Upload Section */}
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 text-xs font-bold text-gray-400 uppercase tracking-wider">
+                    <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-[10px]">1</span>
+                    Video-Clips hinzufügen
+                  </div>
+                  
+                  <div className="p-6 rounded-2xl border border-gray-150 bg-white shadow-3xs">
+                    <div 
+                      onClick={() => concatInputRef.current?.click()}
+                      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const files = e.dataTransfer.files;
+                        if (files && files.length > 0) {
+                          const event = { target: { files } } as any;
+                          handleConcatVideoUpload(event);
+                        }
+                      }}
+                      className="border-2 border-dashed border-gray-200 hover:border-emerald-500 rounded-xl p-9 text-center cursor-pointer transition bg-gray-50/40 hover:bg-emerald-50/10 group flex flex-col items-center justify-center min-h-[150px]"
+                    >
+                      <RefreshCw className={`w-9 h-9 text-gray-400 group-hover:text-emerald-500 transition mb-3 ${isConcatUploading ? 'animate-spin' : ''}`} />
+                      <span className="text-xs font-semibold text-gray-700">
+                        {isConcatUploading ? "Clips werden analysiert und hochgeladen..." : "Video-Clips hochladen oder hierher ziehen..."}
+                      </span>
+                      <span className="text-[10px] text-gray-400 mt-1">
+                        Unterstützt MP4, MOV, WEBM, AVI bis zu 2GB (Mehrfachauswahl möglich)
+                      </span>
+                    </div>
+                    
+                    <input
+                      ref={concatInputRef}
+                      type="file"
+                      accept="video/*"
+                      multiple
+                      className="hidden"
+                      onChange={handleConcatVideoUpload}
+                      disabled={isConcatUploading || isConcating}
+                    />
+                  </div>
+                </div>
+
+                {/* 2. Playlist Queue Section */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-xs font-bold text-gray-400 uppercase tracking-wider">
+                    <span className="flex items-center gap-2">
+                      <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-[10px]">2</span>
+                      Reihenfolge der Clips ({concatVideos.length})
+                    </span>
+                    {concatVideos.length > 0 && (
+                      <button 
+                        onClick={() => setConcatVideos([])}
+                        className="text-red-500 hover:text-red-700 font-semibold transition-colors normal-case cursor-pointer"
+                      >
+                        Alle entfernen
+                      </button>
+                    )}
+                  </div>
+
+                  {concatVideos.length === 0 ? (
+                    <div className="border border-gray-150 rounded-2xl bg-white p-12 text-center text-sm text-gray-400">
+                      Keine Videos hinzugefügt. Lade oben Clips hoch, um deine Verkettung zu planen.
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {concatVideos.map((video, idx) => (
+                        <div 
+                          key={idx} 
+                          className="bg-white rounded-xl border border-gray-150 p-4 shadow-3xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 transition hover:border-gray-200"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="bg-emerald-50 text-emerald-600 font-mono text-xs w-6 h-6 rounded-full flex items-center justify-center font-bold shrink-0">
+                              {idx + 1}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="text-sm font-semibold text-gray-900 truncate">
+                                {video.originalName}
+                              </div>
+                              <div className="text-xs text-gray-400 mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                                <span className="font-mono bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded text-[10px]">
+                                  {video.width}x{video.height}
+                                </span>
+                                <span>•</span>
+                                <span>Dauer: <strong className="text-gray-700">{video.duration.toFixed(1)}s</strong></span>
+                                <span>•</span>
+                                <span>Tonspur: {video.hasAudio ? <span className="text-emerald-600 font-medium">Ja</span> : <span className="text-gray-400">Nein (Stummschaltung)</span>}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Order Controls & Actions */}
+                          <div className="flex items-center gap-1 shrink-0 w-full sm:w-auto justify-end border-t sm:border-t-0 pt-2 sm:pt-0">
+                            <button
+                              onClick={() => moveClipUp(idx)}
+                              disabled={idx === 0}
+                              className="p-1.5 hover:bg-gray-50 rounded-lg text-gray-500 hover:text-gray-900 disabled:opacity-30 disabled:hover:bg-transparent transition-colors cursor-pointer"
+                              title="Nach oben verschieben"
+                            >
+                              <ArrowUp className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => moveClipDown(idx)}
+                              disabled={idx === concatVideos.length - 1}
+                              className="p-1.5 hover:bg-gray-50 rounded-lg text-gray-500 hover:text-gray-900 disabled:opacity-30 disabled:hover:bg-transparent transition-colors cursor-pointer"
+                              title="Nach unten verschieben"
+                            >
+                              <ArrowDown className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => removeClip(idx)}
+                              className="p-1.5 hover:bg-red-50 rounded-lg text-red-500 hover:text-red-700 transition-colors ml-1 cursor-pointer"
+                              title="Clip entfernen"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Processing Loader */}
+                {isConcating && (
+                  <div className="bg-emerald-950 p-6 rounded-2xl text-white shadow-md relative overflow-hidden flex flex-col items-center justify-center gap-4 py-8 animate-fade-in">
+                    <Loader2 className="w-10 h-10 text-emerald-400 animate-spin" />
+                    <div className="text-center space-y-1">
+                      <h4 className="font-semibold text-sm">Videos werden zusammengefügt...</h4>
+                      <p className="text-xs text-emerald-200 font-mono">{processStatus}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* 3. Concat Results display */}
+                {concatResultUrl && (
+                  <div className="space-y-4 animate-fade-in">
+                    <div className="flex items-center gap-2 text-xs font-bold text-gray-400 uppercase tracking-wider">
+                      <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-[10px]">3</span>
+                      Erstelltes Zielvideo
+                    </div>
+
+                    <div className="bg-white rounded-2xl border border-gray-150 p-6 shadow-xs space-y-6">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+                        
+                        {/* Left Column: Player */}
+                        <div className="space-y-3">
+                          <div className="aspect-video bg-black rounded-xl overflow-hidden shadow-inner border border-gray-100 flex items-center justify-center">
+                            <video
+                              src={concatResultUrl}
+                              controls
+                              className="w-full h-full object-contain"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Right Column: Metadata details & download */}
+                        <div className="space-y-4 flex flex-col justify-between h-full">
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-bold uppercase tracking-wider bg-emerald-50 text-emerald-700 px-2.5 py-0.5 rounded-md border border-emerald-150/45">
+                                Zielvideo Bereit
+                              </span>
+                              <span className="text-[10px] font-mono text-gray-400">Format: MP4 Container</span>
+                            </div>
+                            <h4 className="font-display font-semibold text-base text-gray-900 leading-tight">
+                              Verkettetes & Normalisiertes Resultat
+                            </h4>
+                            
+                            <div className="bg-gray-50 rounded-xl p-4 border border-gray-100 space-y-2 text-xs text-gray-600 font-mono">
+                              <div className="flex justify-between">
+                                <span>Gesamtdauer:</span>
+                                <span className="text-gray-900 font-bold">
+                                  {concatResultMeta?.duration?.toFixed(2) || "N/A"} Sekunden
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>Auflösung:</span>
+                                <span className="text-gray-900 font-bold">
+                                  {concatResultMeta?.width || 1280}x{concatResultMeta?.height || 720}
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>Bildrate:</span>
+                                <span className="text-gray-900 font-bold">30 FPS</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>Audio-Kanal:</span>
+                                <span className="text-gray-900 font-bold">Stereo 44.1kHz AAC</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <a
+                            href={concatResultUrl}
+                            download={`merged-video-${Date.now()}.mp4`}
+                            className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-md cursor-pointer active:scale-[0.99] mt-4"
+                          >
+                            <Download className="w-4 h-4" /> Zielvideo herunterladen
+                          </a>
+                        </div>
+
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+              </div>
+
+              {/* Right Column: Technical guidelines for merging */}
+              <div className="lg:col-span-4 space-y-6">
+                <div className="bg-white rounded-2xl border border-gray-150 p-6 shadow-xs space-y-5">
+                  <div className="flex items-center gap-2.5 pb-4 border-b border-gray-50">
+                    <div className="p-2 bg-emerald-50 text-emerald-600 rounded-xl">
+                      <Sliders className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="font-display font-semibold text-sm text-gray-900">Technische Normalisierung</h3>
+                      <p className="text-[11px] text-gray-400">Automatische Qualitätssicherung</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="space-y-1">
+                      <div className="text-xs font-semibold text-gray-800">1. Seitenverhältnis-Gleichschaltung</div>
+                      <p className="text-xs text-gray-500 leading-normal">
+                        Abweichende Auflösungen oder Ausrichtungen werden dank intelligentem Letterboxing/Pillboxing vollautomatisch an ein standardisiertes 1280x720 HD-Format angepasst, ohne das Originalbild zu verzerren oder zu quetschen.
+                      </p>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="text-xs font-semibold text-gray-800">2. Frame-Präzision & Bildwiederholrate</div>
+                      <p className="text-xs text-gray-500 leading-normal">
+                        Alle Clips werden auf exakt 30 Bilder pro Sekunde (30 FPS) neu berechnet, um Ruckeln, asynchronen Ton oder Abspielfehler an den Übergängen zu verhindern.
+                      </p>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="text-xs font-semibold text-gray-800">3. Nahtloser Sound & Stumm-Ausgleich</div>
+                      <p className="text-xs text-gray-500 leading-normal">
+                        Sollte ein Clip keinen Ton besitzen, wird automatisch ein lautloser Audiopuffer der gleichen Dauer generiert. So bleibt die Tonspur des Gesamtwerks intakt und läuft nicht asynchron.
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleTriggerConcatenation}
+                    disabled={concatVideos.length < 2 || isConcating}
+                    className={`w-full py-3.5 rounded-xl text-xs font-bold tracking-wide transition flex items-center justify-center gap-2 shadow-sm shrink-0 ${
+                      concatVideos.length < 2 || isConcating
+                        ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                        : "bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer active:scale-[0.99]"
+                    }`}
+                  >
+                    {isConcating ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" /> Zusammenfügung läuft...
+                      </>
+                    ) : (
+                      <>
+                        <Wand2 className="w-4 h-4" /> Videos verketten
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
 
             </div>

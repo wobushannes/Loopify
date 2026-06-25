@@ -465,6 +465,116 @@ app.post("/api/split-audio", async (req: any, res) => {
   }
 });
 
+// Video Concatenation API Endpoint (Video-Verkettung)
+app.post("/api/concat-videos", async (req: any, res) => {
+  const { videoPaths } = req.body;
+
+  if (!videoPaths || !Array.isArray(videoPaths) || videoPaths.length < 2) {
+    return res.status(400).json({ success: false, error: "Mindestens zwei Videos müssen zum Verketten angegeben werden." });
+  }
+
+  // Verify all files exist
+  for (const p of videoPaths) {
+    if (!fs.existsSync(p)) {
+      return res.status(400).json({ success: false, error: `Video-Datei wurde nicht gefunden: ${path.basename(p)}` });
+    }
+  }
+
+  const taskId = Date.now();
+  const normalizedFiles: string[] = [];
+  const outputFilename = `concat-${taskId}.mp4`;
+  const outputPath = path.join(OUTPUTS_DIR, outputFilename);
+  const concatListPath = path.join(OUTPUTS_DIR, `list-${taskId}.txt`);
+
+  try {
+    console.log(`Starting video concatenation for ${videoPaths.length} videos`);
+
+    // Step 1: Normalize each video to 1280x720, 30fps, stereo aac 44100Hz audio (adding silence if missing)
+    for (let i = 0; i < videoPaths.length; i++) {
+      const inputPath = videoPaths[i];
+      const normPath = path.join(OUTPUTS_DIR, `norm-${taskId}-${i}.mp4`);
+      normalizedFiles.push(normPath);
+
+      const meta = await getMediaMetadata(inputPath);
+      
+      let normCmd = "";
+      if (meta.hasAudio) {
+        normCmd = `"${ffmpegCmd}" -y -i "${inputPath}" -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1" -r 30 -c:v libx264 -pix_fmt yuv420p -b:v 2M -c:a aac -b:a 128k -ar 44100 -ac 2 "${normPath}"`;
+      } else {
+        normCmd = `"${ffmpegCmd}" -y -i "${inputPath}" -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 -t ${meta.duration} -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1" -r 30 -c:v libx264 -pix_fmt yuv420p -b:v 2M -c:a aac -b:a 128k -ar 44100 -ac 2 "${normPath}"`;
+      }
+
+      console.log(`Normalizing video ${i + 1}/${videoPaths.length}: ${normCmd}`);
+      await new Promise<void>((resolve, reject) => {
+        exec(normCmd, (err, stdout, stderr) => {
+          if (err) {
+            console.error(`Error normalizing video ${i}:`, stderr);
+            reject(new Error(`Fehler bei der Videonormalisierung von Clip ${i + 1}.`));
+          } else {
+            resolve();
+          }
+        });
+      });
+    }
+
+    // Step 2: Create concat list file
+    const listContent = normalizedFiles.map(fp => `file '${fp.replace(/\\/g, "/")}'`).join("\n");
+    fs.writeFileSync(concatListPath, listContent);
+
+    // Step 3: Concat normalized videos
+    const concatCmd = `"${ffmpegCmd}" -y -f concat -safe 0 -i "${concatListPath}" -c copy "${outputPath}"`;
+    console.log(`Running concat command: ${concatCmd}`);
+
+    await new Promise<void>((resolve, reject) => {
+      exec(concatCmd, (err, stdout, stderr) => {
+        if (err) {
+          console.error("Concat command failed:", stderr);
+          reject(new Error("Fehler beim Zusammenfügen der normalisierten Videos."));
+        } else {
+          resolve();
+        }
+      });
+    });
+
+    // Clean up normalized temporary videos and text list file
+    for (const fp of normalizedFiles) {
+      if (fs.existsSync(fp)) {
+        try { fs.unlinkSync(fp); } catch (e) {}
+      }
+    }
+    if (fs.existsSync(concatListPath)) {
+      try { fs.unlinkSync(concatListPath); } catch (e) {}
+    }
+
+    // Get metadata of the output video
+    const finalMeta = await getMediaMetadata(outputPath);
+
+    res.json({
+      success: true,
+      videoUrl: `/outputs/${outputFilename}`,
+      meta: finalMeta
+    });
+
+  } catch (err: any) {
+    console.error("Concatenation error:", err);
+    
+    // Clean up any generated files on error
+    for (const fp of normalizedFiles) {
+      if (fs.existsSync(fp)) {
+        try { fs.unlinkSync(fp); } catch (e) {}
+      }
+    }
+    if (fs.existsSync(concatListPath)) {
+      try { fs.unlinkSync(concatListPath); } catch (e) {}
+    }
+    if (fs.existsSync(outputPath)) {
+      try { fs.unlinkSync(outputPath); } catch (e) {}
+    }
+
+    res.status(500).json({ success: false, error: err.message || "Unbekannter Fehler bei der Zusammenfügung." });
+  }
+});
+
 // Start backend server
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
