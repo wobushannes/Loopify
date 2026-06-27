@@ -53,3 +53,10 @@ export interface BlendParameters {
   trim: TrimSelection;
   loopType: LoopMode;
 }
+
+export interface ExtractedFrame {
+  url: string;
+  videoName: string;
+  frameNum: number;
+}
+

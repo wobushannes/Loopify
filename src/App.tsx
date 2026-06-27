@@ -38,9 +38,11 @@ import {
   ZoomOut,
   Eye,
   ChevronLeft,
-  Grid
+  Grid,
+  Check,
+  Upload
 } from "lucide-react";
-import { UploadedFile, CropSelection, TrimSelection, LoopMode, QueueItem, CompressionPreset } from "./types";
+import { UploadedFile, CropSelection, TrimSelection, LoopMode, QueueItem, CompressionPreset, ExtractedFrame } from "./types";
 import MediaUploader from "./components/MediaUploader";
 import VideoCropTrim from "./components/VideoCropTrim";
 
@@ -84,11 +86,12 @@ export default function App() {
 
   // State: Video Frame Extractor
   const [framesVideoFile, setFramesVideoFile] = useState<UploadedFile | undefined>(undefined);
+  const [framesLocalFile, setFramesLocalFile] = useState<File | null>(null);
   const [isFramesUploading, setIsFramesUploading] = useState(false);
   const framesInputRef = useRef<HTMLInputElement>(null);
   const [everyXthFrame, setEveryXthFrame] = useState<number>(10);
   const [isExtractingFrames, setIsExtractingFrames] = useState(false);
-  const [extractedFrames, setExtractedFrames] = useState<string[]>([]);
+  const [extractedFrames, setExtractedFrames] = useState<ExtractedFrame[]>([]);
   const [totalExtractedCount, setTotalExtractedCount] = useState<number>(0);
   const [selectedFrameIndex, setSelectedFrameIndex] = useState<number | null>(null);
   const [frameZoomFactor, setFrameZoomFactor] = useState<number>(1);
@@ -98,6 +101,53 @@ export default function App() {
   const [zipProgress, setZipProgress] = useState<string>("");
   const [extractResolution, setExtractResolution] = useState<string>("original");
   const [extractedResolutionUsed, setExtractedResolutionUsed] = useState<string>("original");
+
+  // Project Batch Frame Extraction states
+  const [extractMode, setExtractMode] = useState<"single" | "project">("single");
+  const [projectName, setProjectName] = useState<string>("Mein Frame-Projekt");
+  const [projectVideos, setProjectVideos] = useState<UploadedFile[]>([]);
+  const [projectUploadProgress, setProjectUploadProgress] = useState<string>("");
+  const [isProjectUploading, setIsProjectUploading] = useState<boolean>(false);
+  const projectInputRef = useRef<HTMLInputElement>(null);
+  const [isBatchExtracting, setIsBatchExtracting] = useState<boolean>(false);
+  
+  // Results map: key is fullPath, value has frames, totalCount, etc.
+  const [projectResults, setProjectResults] = useState<{
+    [videoPath: string]: {
+      frames: string[];
+      totalCount: number;
+      resolution: string;
+      status: "idle" | "processing" | "done" | "failed";
+      error?: string;
+    };
+  }>({});
+  const [selectedProjectVideoPath, setSelectedProjectVideoPath] = useState<string | null>(null);
+
+  // Output folder cleaner state
+  const [isClearingOutputs, setIsClearingOutputs] = useState<boolean>(false);
+  const [clearStatusMessage, setClearStatusMessage] = useState<string>("");
+
+  // Local Path Input states (for offline/large video direct file-system usage)
+  const [singleInputMethod, setSingleInputMethod] = useState<"upload" | "localPath" | "localFileDialog">("localFileDialog");
+  const [singleLocalPath, setSingleLocalPath] = useState<string>("");
+  const [isVerifyingSingleLocalPath, setIsVerifyingSingleLocalPath] = useState<boolean>(false);
+
+  const [projectInputMethod, setProjectInputMethod] = useState<"upload" | "localPath" | "localFileDialog">("localFileDialog");
+  const [projectLocalPathsText, setProjectLocalPathsText] = useState<string>("");
+  const [isVerifyingProjectLocalPaths, setIsVerifyingProjectLocalPaths] = useState<boolean>(false);
+  const [projectLocalPathsProgress, setProjectLocalPathsProgress] = useState<string>("");
+
+  const [baseSearchDir, setBaseSearchDir] = useState<string>("");
+  const [dirVerifyMessage, setDirVerifyMessage] = useState<string>("");
+  const [dirVerifySuccess, setDirVerifySuccess] = useState<boolean | null>(null);
+  const [isVerifyingDir, setIsVerifyingDir] = useState<boolean>(false);
+  
+  const localSingleFileDialogRef = useRef<HTMLInputElement>(null);
+  const localProjectFileDialogRef = useRef<HTMLInputElement>(null);
+  const [isLocatingFiles, setIsLocatingFiles] = useState<boolean>(false);
+  const [localVideosList, setLocalVideosList] = useState<any[]>([]);
+  const [isListingLocalVideos, setIsListingLocalVideos] = useState<boolean>(false);
+  const [showAlternativeMethods, setShowAlternativeMethods] = useState<boolean>(false);
 
   // Mixer parameters
   const [cropConfig, setCropConfig] = useState<CropSelection>({ x: 0, y: 0, width: 200, height: 200 });
@@ -797,8 +847,6 @@ export default function App() {
 
     setIsFramesUploading(true);
     setProcessError("");
-    setExtractedFrames([]);
-    setTotalExtractedCount(0);
 
     const file = files[0];
     const formData = new FormData();
@@ -831,8 +879,6 @@ export default function App() {
 
     setIsExtractingFrames(true);
     setProcessError("");
-    setExtractedFrames([]);
-    setTotalExtractedCount(0);
     setSelectedFrameIndex(null);
     setProcessingTimeSec(0);
 
@@ -841,6 +887,131 @@ export default function App() {
     }, 1000);
 
     setProcessStatus("Lese Video ein und extrahiere Frames... Bitte warten.");
+
+    if (framesLocalFile) {
+      // 100% Client-Side Canvas extraction! No server upload or path reading needed!
+      try {
+        const file = framesLocalFile;
+        const step = everyXthFrame;
+        const resolution = extractResolution;
+
+        const video = document.createElement("video");
+        video.src = URL.createObjectURL(file);
+        video.crossOrigin = "anonymous";
+        video.muted = true;
+        video.playsInline = true;
+        
+        // Append hidden to body to ensure rendering triggers correctly in all browsers (e.g., Chrome/Safari)
+        video.style.position = "absolute";
+        video.style.left = "-9999px";
+        video.style.top = "-9999px";
+        video.style.width = "100px";
+        video.style.height = "100px";
+        document.body.appendChild(video);
+
+        await new Promise<void>((resolve, reject) => {
+          video.onloadedmetadata = () => resolve();
+          video.onerror = (e) => reject(new Error("Video konnte nicht geladen werden."));
+        });
+
+        const duration = video.duration;
+        const fps = 30; // standard assumptions
+        const totalFrames = Math.floor(duration * fps);
+        
+        const targetFrameIndices: number[] = [];
+        for (let f = 0; f < totalFrames; f += step) {
+          targetFrameIndices.push(f);
+        }
+
+        // Limit to prevent browser running out of memory (e.g. max 500 frames)
+        const framesToExtract = targetFrameIndices.slice(0, 500); 
+
+        const framesList: string[] = [];
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+
+        // Determine dimensions based on selected resolution preset
+        let targetWidth = video.videoWidth;
+        let targetHeight = video.videoHeight;
+        
+        if (resolution === "3840") {
+          targetWidth = 3840;
+          targetHeight = Math.round(3840 * (video.videoHeight / video.videoWidth));
+        } else if (resolution === "1920") {
+          targetWidth = 1920;
+          targetHeight = Math.round(1920 * (video.videoHeight / video.videoWidth));
+        } else if (resolution === "1280") {
+          targetWidth = 1280;
+          targetHeight = Math.round(1280 * (video.videoHeight / video.videoWidth));
+        } else if (resolution === "480") {
+          targetWidth = 480;
+          targetHeight = Math.round(480 * (video.videoHeight / video.videoWidth));
+        }
+        
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+
+        for (let i = 0; i < framesToExtract.length; i++) {
+          const frameIdx = framesToExtract[i];
+          const time = frameIdx / fps;
+          if (time > duration) break;
+
+          // Seek to time
+          await new Promise<void>((seekResolve) => {
+            const onSeeked = () => {
+              video.removeEventListener("seeked", onSeeked);
+              seekResolve();
+            };
+            video.addEventListener("seeked", onSeeked);
+            video.currentTime = time;
+            // timeout fallback to prevent getting stuck
+            setTimeout(() => {
+              video.removeEventListener("seeked", onSeeked);
+              seekResolve();
+            }, 600);
+          });
+
+          // Draw frame to canvas
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+            const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+            framesList.push(dataUrl);
+          }
+
+          setProcessStatus(`Extrahiere Frame ${i + 1} von ${framesToExtract.length}... (${Math.round((i + 1) / framesToExtract.length * 100)}%)`);
+        }
+
+        try { document.body.removeChild(video); } catch (e) {}
+        URL.revokeObjectURL(video.src);
+
+        if (framesList.length > 0) {
+          const videoName = framesLocalFile ? framesLocalFile.name : (framesVideoFile ? framesVideoFile.filename : "video");
+          const newExtracted: ExtractedFrame[] = framesList.map((url, i) => ({
+            url,
+            videoName,
+            frameNum: framesToExtract[i]
+          }));
+          setExtractedFrames(prev => {
+            const updated = [...prev, ...newExtracted];
+            setTotalExtractedCount(updated.length);
+            setSelectedFrameIndex(prev.length);
+            return updated;
+          });
+          setExtractedResolutionUsed(extractResolution);
+        } else {
+          setProcessError("Keine Frames extrahiert.");
+        }
+      } catch (err: any) {
+        console.error(err);
+        setProcessError("Fehler bei der lokalen Frame-Extraktion: " + (err.message || err));
+      } finally {
+        setIsExtractingFrames(false);
+        clearInterval(timerId);
+        setProcessingTimeSec(0);
+        setProcessStatus("");
+      }
+      return;
+    }
 
     try {
       const response = await fetch("/api/extract-frames", {
@@ -855,9 +1026,18 @@ export default function App() {
 
       const data = await response.json();
       if (data.success) {
-        setExtractedFrames(data.frames);
-        setTotalExtractedCount(data.totalCount);
-        setSelectedFrameIndex(0);
+        const videoName = framesVideoFile ? framesVideoFile.filename : "video";
+        const newExtracted: ExtractedFrame[] = data.frames.map((urlStr: string, i: number) => ({
+          url: urlStr,
+          videoName,
+          frameNum: i * everyXthFrame
+        }));
+        setExtractedFrames(prev => {
+          const updated = [...prev, ...newExtracted];
+          setTotalExtractedCount(updated.length);
+          setSelectedFrameIndex(prev.length);
+          return updated;
+        });
         setExtractedResolutionUsed(extractResolution);
       } else {
         setProcessError(data.error || "Fehler beim Extrahieren der Frames.");
@@ -881,23 +1061,38 @@ export default function App() {
     try {
       const zip = new JSZip();
       
-      // Download all frames sequentially and update progress
+      // Download or decode all frames sequentially and update progress
       for (let i = 0; i < extractedFrames.length; i++) {
-        const frameUrl = extractedFrames[i];
-        const frameNum = i * everyXthFrame;
+        const frameObj = extractedFrames[i];
+        const frameUrl = frameObj.url;
+        const frameNum = frameObj.frameNum;
+        const videoName = frameObj.videoName || "video";
+        const cleanVideoName = videoName.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_.-]/g, "_");
         
-        setZipProgress(`Lade Bild ${i + 1} von ${extractedFrames.length} herunter...`);
+        setZipProgress(`Bereite Bild ${i + 1} von ${extractedFrames.length} vor...`);
         
-        const response = await fetch(frameUrl);
-        if (!response.ok) {
-          throw new Error(`Fehler beim Herunterladen von Frame ${frameNum}`);
+        let arrayBuffer: ArrayBuffer;
+        if (frameUrl.startsWith("data:")) {
+          // Parse data URL manually in memory
+          const parts = frameUrl.split(",");
+          const byteString = atob(parts[1]);
+          const ab = new ArrayBuffer(byteString.length);
+          const ia = new Uint8Array(ab);
+          for (let k = 0; k < byteString.length; k++) {
+            ia[k] = byteString.charCodeAt(k);
+          }
+          arrayBuffer = ab;
+        } else {
+          const response = await fetch(frameUrl);
+          if (!response.ok) {
+            throw new Error(`Fehler beim Herunterladen von Frame ${frameNum}`);
+          }
+          arrayBuffer = await response.arrayBuffer();
         }
         
-        const arrayBuffer = await response.arrayBuffer();
-        
-        // Pad the filename so they sort nicely (e.g. frame-0001_f0.jpg, frame-0002_f10.jpg)
+        // Pad the filename so they sort nicely (e.g. dji_fly_frame-0001_f0.jpg)
         const paddedIndex = String(i + 1).padStart(4, "0");
-        const filename = `frame-${paddedIndex}_f${frameNum}.jpg`;
+        const filename = `${cleanVideoName}_frame-${paddedIndex}_f${frameNum}.jpg`;
         
         zip.file(filename, arrayBuffer);
       }
@@ -926,6 +1121,448 @@ export default function App() {
     } finally {
       setIsDownloadingZip(false);
       setZipProgress("");
+    }
+  };
+
+  // Handler to empty the entire outputs folder on the server
+  const handleClearOutputs = async () => {
+    if (!window.confirm("Bist du sicher, dass du den gesamten Output-Ordner leeren möchtest? Dies löscht alle extrahierten Frames und generierten Schleifen.")) {
+      return;
+    }
+    
+    setIsClearingOutputs(true);
+    setProcessError("");
+    setClearStatusMessage("");
+    
+    try {
+      const response = await fetch("/api/clear-outputs", {
+        method: "POST"
+      });
+      const data = await response.json();
+      if (data.success) {
+        setClearStatusMessage(data.message || "Output-Ordner erfolgreich geleert.");
+        // Clear active frames UI if any were displayed from outputs
+        setExtractedFrames([]);
+        setTotalExtractedCount(0);
+        setSelectedFrameIndex(null);
+        setProjectResults({});
+        setTimeout(() => setClearStatusMessage(""), 5000);
+      } else {
+        setProcessError(data.error || "Fehler beim Leeren des Output-Ordners.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setProcessError("Serververbindung fehlgeschlagen beim Leeren des Output-Ordners.");
+    } finally {
+      setIsClearingOutputs(false);
+    }
+  };
+
+  // Upload multiple videos directly to the extraction project
+  const handleProjectVideoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    setIsProjectUploading(true);
+    setProcessError("");
+    setProjectUploadProgress("Lade Videos hoch...");
+
+    const uploadedFilesList: UploadedFile[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      setProjectUploadProgress(`Lade Video ${i + 1} von ${files.length} hoch (${file.name})...`);
+      const formData = new FormData();
+      formData.append("videoFile", file);
+
+      try {
+        const response = await fetch("/api/upload", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await response.json();
+        if (data.success && data.files.video) {
+          uploadedFilesList.push(data.files.video);
+        } else {
+          setProcessError(prev => prev || (data.error || `Fehler beim Hochladen von: ${file.name}`));
+        }
+      } catch (err: any) {
+        console.error(err);
+        setProcessError("Verbindung zum Server fehlgeschlagen beim Hochladen der Projekt-Videos.");
+      }
+    }
+
+    if (uploadedFilesList.length > 0) {
+      setProjectVideos(prev => [...prev, ...uploadedFilesList]);
+    }
+    setIsProjectUploading(false);
+    setProjectUploadProgress("");
+    if (projectInputRef.current) {
+      projectInputRef.current.value = "";
+    }
+  };
+
+  // Register single local video file path directly from server disk
+  const handleRegisterSingleLocalPath = async () => {
+    if (!singleLocalPath.trim()) {
+      setProcessError("Bitte gib einen Pfad an.");
+      return;
+    }
+    setIsVerifyingSingleLocalPath(true);
+    setProcessError("");
+    try {
+      const response = await fetch("/api/register-local-path", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ localPath: singleLocalPath }),
+      });
+      const data = await response.json();
+      if (data.success && data.file) {
+        setFramesVideoFile(data.file);
+        setFramesLocalFile(null); // Clear raw local file because this is a server-side path
+      } else {
+        setProcessError(data.error || "Fehler beim Laden des lokalen Videos.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setProcessError("Verbindung zum Server fehlgeschlagen.");
+    } finally {
+      setIsVerifyingSingleLocalPath(false);
+    }
+  };
+
+  // Register multiple local video file paths directly from server disk
+  const handleRegisterProjectLocalPaths = async () => {
+    if (!projectLocalPathsText.trim()) {
+      setProcessError("Bitte gib mindestens einen Pfad an.");
+      return;
+    }
+    const lines = projectLocalPathsText
+      .split("\n")
+      .map(line => line.trim())
+      .filter(line => line.length > 0);
+
+    if (lines.length === 0) {
+      setProcessError("Keine gültigen Pfade gefunden.");
+      return;
+    }
+
+    setIsVerifyingProjectLocalPaths(true);
+    setProcessError("");
+    setProjectLocalPathsProgress("Initialisiere...");
+
+    const addedFiles: UploadedFile[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const pathLine = lines[i];
+      setProjectLocalPathsProgress(`Prüfe Video ${i + 1} von ${lines.length}...`);
+      try {
+        const response = await fetch("/api/register-local-path", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ localPath: pathLine }),
+        });
+        const data = await response.json();
+        if (data.success && data.file) {
+          addedFiles.push(data.file);
+        } else {
+          setProcessError(prev => prev || `Fehler bei: ${pathLine}. ${data.error || ""}`);
+        }
+      } catch (err: any) {
+        console.error(err);
+        setProcessError(prev => prev || `Verbindungsfehler bei: ${pathLine}`);
+      }
+    }
+
+    if (addedFiles.length > 0) {
+      setProjectVideos(prev => [...prev, ...addedFiles]);
+      setProjectLocalPathsText(""); // Clear textarea on success of adding anything
+    }
+    setIsVerifyingProjectLocalPaths(false);
+    setProjectLocalPathsProgress("");
+  };
+
+  const handleVerifyDirectory = async (customPath?: string) => {
+    const targetPath = typeof customPath === "string" ? customPath : baseSearchDir;
+    setIsVerifyingDir(true);
+    setDirVerifyMessage("");
+    setDirVerifySuccess(null);
+    try {
+      const response = await fetch("/api/verify-directory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dirPath: targetPath }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        setDirVerifySuccess(data.exists);
+        setDirVerifyMessage(data.message);
+      } else {
+        setDirVerifySuccess(false);
+        setDirVerifyMessage(data.message || "Fehler beim Prüfen des Verzeichnisses.");
+      }
+    } catch (err) {
+      console.error(err);
+      setDirVerifySuccess(false);
+      setDirVerifyMessage("Verbindung zum Server fehlgeschlagen.");
+    } finally {
+      setIsVerifyingDir(false);
+    }
+  };
+
+  // Resolves a single file chosen in browser native dialog to its server absolute path (no upload, no searching!)
+  const handleLocateSingleLocalFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    const file = files[0];
+    setIsLocatingFiles(true);
+    setProcessError("");
+    setFramesLocalFile(file);
+
+    try {
+      const video = document.createElement("video");
+      video.preload = "metadata";
+      video.src = URL.createObjectURL(file);
+      
+      await new Promise<void>((resolve, reject) => {
+        video.onloadedmetadata = () => {
+          resolve();
+        };
+        video.onerror = () => {
+          reject(new Error("Video-Metadaten konnten nicht gelesen werden."));
+        };
+      });
+
+      const videoFileObj: UploadedFile = {
+        filename: file.name,
+        originalName: file.name,
+        path: file.name,
+        fullPath: file.name,
+        duration: video.duration,
+        width: video.videoWidth,
+        height: video.videoHeight,
+        hasAudio: false
+      };
+
+      setFramesVideoFile(videoFileObj);
+      setSingleLocalPath(file.name);
+
+      URL.revokeObjectURL(video.src);
+    } catch (err: any) {
+      console.error(err);
+      setProcessError("Das ausgewählte Video konnte nicht im Browser geladen werden. Bitte stellen Sie sicher, dass es sich um eine gültige Videodatei handelt.");
+    } finally {
+      setIsLocatingFiles(false);
+      if (localSingleFileDialogRef.current) {
+        localSingleFileDialogRef.current.value = "";
+      }
+    }
+  };
+
+  const handleListLocalVideos = async () => {
+    setIsListingLocalVideos(true);
+    try {
+      const response = await fetch("/api/list-local-videos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ baseSearchDir })
+      });
+      const data = await response.json();
+      if (data.success && data.videos) {
+        setLocalVideosList(data.videos);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsListingLocalVideos(false);
+    }
+  };
+
+  const handleSelectLocalVideo = async (video: any) => {
+    setIsLocatingFiles(true);
+    setProcessError("");
+    try {
+      const response = await fetch("/api/locate-local-file", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: video.filename,
+          baseSearchDir: baseSearchDir || ""
+        }),
+      });
+      const data = await response.json();
+      if (data.success && data.file) {
+        if (extractMode === "single") {
+          setFramesVideoFile(data.file);
+          setSingleLocalPath(data.file.fullPath);
+        } else {
+          if (!projectVideos.some(v => v.fullPath === data.file.fullPath)) {
+            setProjectVideos(prev => [...prev, data.file]);
+          }
+        }
+      } else {
+        setProcessError(data.error || `Fehler beim Auswählen der Datei ${video.filename}`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setProcessError("Fehler beim Abrufen der Video-Metadaten vom Server.");
+    } finally {
+      setIsLocatingFiles(false);
+    }
+  };
+
+  // Load local files list on baseSearchDir change
+  useEffect(() => {
+    handleListLocalVideos();
+  }, [baseSearchDir]);
+
+  // Resolves multiple files chosen in browser native dialog to their server absolute paths (no upload)
+  const handleLocateProjectLocalFiles = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    setIsLocatingFiles(true);
+    setProcessError("");
+    setProjectLocalPathsProgress("Lokalisiere Videos auf der Festplatte...");
+
+    const addedFiles: UploadedFile[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      setProjectLocalPathsProgress(`Suche Video ${i + 1} von ${files.length} (${file.name})...`);
+
+      try {
+        const response = await fetch("/api/locate-local-file", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            filename: file.name,
+            baseSearchDir: baseSearchDir
+          }),
+        });
+        const data = await response.json();
+        if (data.success && data.file) {
+          addedFiles.push(data.file);
+        } else {
+          setProcessError(prev => prev || `Fehler bei: ${file.name}. ${data.error || ""}`);
+        }
+      } catch (err: any) {
+        console.error(err);
+        setProcessError(prev => prev || `Verbindungsfehler bei Lokalisierung von: ${file.name}`);
+      }
+    }
+
+    if (addedFiles.length > 0) {
+      setProjectVideos(prev => [...prev, ...addedFiles]);
+    }
+    setIsLocatingFiles(false);
+    setProjectLocalPathsProgress("");
+    if (localProjectFileDialogRef.current) {
+      localProjectFileDialogRef.current.value = "";
+    }
+  };
+
+  // Sequential Batch Extraction of frames from all project videos
+  const handleTriggerBatchExtraction = async () => {
+    if (projectVideos.length === 0) {
+      setProcessError("Bitte füge dem Projekt zuerst Videos hinzu.");
+      return;
+    }
+
+    setIsExtractingFrames(true);
+    setIsBatchExtracting(true);
+    setProcessError("");
+    setProcessingTimeSec(0);
+
+    const timerId = setInterval(() => {
+      setProcessingTimeSec(prev => prev + 1);
+    }, 1000);
+
+    try {
+      // Loop through all videos in the project sequentially
+      for (let i = 0; i < projectVideos.length; i++) {
+        const video = projectVideos[i];
+        
+        // Update status for this video to processing
+        setProjectResults(prev => ({
+          ...prev,
+          [video.fullPath]: {
+            frames: prev[video.fullPath]?.frames || [],
+            totalCount: prev[video.fullPath]?.totalCount || 0,
+            resolution: extractResolution,
+            status: "processing"
+          }
+        }));
+
+        setProcessStatus(`Verarbeite Video ${i + 1} von ${projectVideos.length}: ${video.originalName}...`);
+
+        try {
+          const response = await fetch("/api/extract-frames", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              videoPath: video.fullPath,
+              everyXthFrame: everyXthFrame,
+              resolution: extractResolution,
+            }),
+          });
+
+          const data = await response.json();
+          if (data.success) {
+            setProjectResults(prev => ({
+              ...prev,
+              [video.fullPath]: {
+                frames: data.frames,
+                totalCount: data.totalCount,
+                resolution: extractResolution,
+                status: "done"
+              }
+            }));
+            
+            // Auto-select and show the first video (or if selected)
+            if (i === 0 || selectedProjectVideoPath === video.fullPath || !selectedProjectVideoPath) {
+              setFramesVideoFile(video);
+              setExtractedFrames(data.frames);
+              setTotalExtractedCount(data.totalCount);
+              setSelectedFrameIndex(0);
+              setExtractedResolutionUsed(extractResolution);
+              setSelectedProjectVideoPath(video.fullPath);
+            }
+          } else {
+            setProjectResults(prev => ({
+              ...prev,
+              [video.fullPath]: {
+                frames: [],
+                totalCount: 0,
+                resolution: extractResolution,
+                status: "failed",
+                error: data.error || "Fehler bei der Extraktion"
+              }
+            }));
+          }
+        } catch (err: any) {
+          console.error(err);
+          setProjectResults(prev => ({
+            ...prev,
+            [video.fullPath]: {
+              frames: [],
+              totalCount: 0,
+              resolution: extractResolution,
+              status: "failed",
+              error: err.message || "Netzwerkfehler"
+            }
+          }));
+        }
+      }
+    } catch (err: any) {
+      console.error(err);
+      setProcessError("Batch-Extraktion fehlgeschlagen: " + err.message);
+    } finally {
+      clearInterval(timerId);
+      setIsExtractingFrames(false);
+      setIsBatchExtracting(false);
+      setProcessStatus("");
     }
   };
 
@@ -3068,48 +3705,91 @@ export default function App() {
               <div className="lg:col-span-4 space-y-6">
                 <div className="bg-white rounded-2xl border border-gray-150 p-6 shadow-xs space-y-6">
                   
-                  {/* Upload box */}
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">
-                      1. Video auswählen
-                    </label>
-                    <div 
-                      onClick={() => framesInputRef.current?.click()}
-                      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        const files = e.dataTransfer.files;
-                        if (files && files.length > 0) {
-                          const event = { target: { files } } as any;
-                          handleFramesVideoUpload(event);
-                        }
-                      }}
-                      className="border-2 border-dashed border-gray-200 hover:border-blue-500 rounded-xl p-6 text-center cursor-pointer transition bg-gray-50/40 hover:bg-blue-50/10 flex flex-col items-center justify-center min-h-[120px]"
-                    >
-                      <RefreshCw className={`w-7 h-7 text-gray-400 hover:text-blue-500 transition mb-2 ${isFramesUploading ? 'animate-spin' : ''}`} />
-                      <span className="text-[11px] font-semibold text-gray-700">
-                        {isFramesUploading ? "Datei wird geladen..." : "Video hierhin ziehen..."}
-                      </span>
-                    </div>
-                    
+                  {/* 1. LOCAL SINGLE VIDEO SELECTION (ZERO UPLOAD) */}
+                  <div className="space-y-4">
+                    {/* Hidden Native File Dialog input */}
                     <input
-                      ref={framesInputRef}
+                      ref={localSingleFileDialogRef}
                       type="file"
                       accept="video/*"
                       className="hidden"
-                      onChange={handleFramesVideoUpload}
-                      disabled={isFramesUploading || isExtractingFrames}
+                      onChange={handleLocateSingleLocalFile}
                     />
 
-                    {framesVideoFile && (
-                      <div className="p-3 bg-gray-50 rounded-xl border border-gray-150 text-xs text-gray-600 truncate font-mono">
-                        📁 {framesVideoFile.originalName}
+                    {/* Display Selected Video Info */}
+                    {framesVideoFile ? (
+                      <div className="space-y-2">
+                        <span className="text-[10px] text-emerald-600 font-bold uppercase tracking-wider block">Ausgewähltes Video (Lokal):</span>
+                        <div className="p-3.5 bg-emerald-50 rounded-xl border border-emerald-150 text-xs text-emerald-900 truncate font-mono space-y-1.5">
+                          <div className="font-bold truncate flex items-center gap-1.5 text-emerald-950">
+                            <span>🎥</span>
+                            <span className="truncate">{framesVideoFile.originalName}</span>
+                          </div>
+                          <div className="text-[10px] text-emerald-800/80 truncate">
+                            Pfad: <span className="select-all bg-emerald-100/60 px-1 py-0.5 rounded font-semibold">{framesVideoFile.fullPath || framesVideoFile.path}</span>
+                          </div>
+                          <div className="text-[10px] text-emerald-800/80 flex justify-between pt-1.5 border-t border-emerald-100/60 font-sans">
+                            <span>Größe: {framesVideoFile.sizeFormatted || `${(framesVideoFile.size / (1024 * 1024)).toFixed(1)} MB`}</span>
+                            <span>Auflösung: {framesVideoFile.width}×{framesVideoFile.height}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-3.5 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-center text-xs text-slate-500">
+                        Noch kein Video ausgewählt.
                       </div>
                     )}
+
+                    {/* Prominent Action Button: Select File via Native Dialog */}
+                    <div className="space-y-2 bg-blue-50/30 p-3.5 rounded-2xl border border-blue-100/50">
+                      <span className="text-[10px] text-blue-900 font-bold uppercase tracking-wider block">1. Video über Dateidialog wählen</span>
+                      <button
+                        type="button"
+                        onClick={() => localSingleFileDialogRef.current?.click()}
+                        disabled={isLocatingFiles}
+                        className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white text-xs font-bold py-3.5 rounded-xl transition flex items-center justify-center gap-2 cursor-pointer shadow-sm active:scale-[0.99]"
+                      >
+                        {isLocatingFiles ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" /> Verarbeite lokale Datei...
+                          </>
+                        ) : (
+                          <>
+                            <Eye className="w-4 h-4" /> Video auswählen (0s Upload)
+                          </>
+                        )}
+                      </button>
+                      <p className="text-[9.5px] text-slate-500 leading-normal text-center">
+                        Bypass-Modus: Kein Web-Upload nötig. Die Datei wird direkt von Ihrer Festplatte referenziert.
+                      </p>
+                    </div>
+
+                    {/* Manual path entry backup */}
+                    <div className="space-y-1.5 pt-1">
+                      <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider block">
+                        Oder absoluten Pfad manuell eingeben:
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={singleLocalPath}
+                          onChange={(e) => setSingleLocalPath(e.target.value)}
+                          placeholder="z.B. C:\Videos\film.mp4"
+                          className="flex-1 px-3 py-2 bg-gray-50 border border-gray-250 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-gray-950 placeholder-gray-400"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleRegisterSingleLocalPath}
+                          disabled={isVerifyingSingleLocalPath}
+                          className="px-4 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-300 text-white text-[11px] font-bold rounded-xl transition flex items-center justify-center shrink-0 cursor-pointer"
+                        >
+                          {isVerifyingSingleLocalPath ? "Lädt..." : "Laden"}
+                        </button>
+                      </div>
+                    </div>
                   </div>
 
-                  {/* Step Interval setting */}
+                  {/* Step 2: Frame-Intervall */}
                   <div className="space-y-2">
                     <label className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center justify-between">
                       <span>2. Frame-Intervall</span>
@@ -3145,7 +3825,7 @@ export default function App() {
                       </div>
 
                       <p className="text-[10px] text-gray-400 leading-normal">
-                        <strong>Standard: 10</strong>. Bei einem 30 FPS Video extrahiert ein Wert von 10 alle 1/3 Sekunde ein Bild. Ein Wert von 1 extrahiert jeden einzelnen Frame (Achtung bei langen Videos!).
+                        <strong>Standard: 10</strong>. Ein Wert von 1 extrahiert jeden einzelnen Frame.
                       </p>
                     </div>
                   </div>
@@ -3194,26 +3874,86 @@ export default function App() {
                     </div>
                   </div>
 
-                  <button
-                    onClick={handleTriggerExtractFrames}
-                    disabled={!framesVideoFile || isExtractingFrames}
-                    className={`w-full py-3.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm ${
-                      !framesVideoFile || isExtractingFrames
-                        ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-                        : "bg-blue-600 hover:bg-blue-700 text-white cursor-pointer active:scale-[0.99]"
-                    }`}
-                  >
-                    {isExtractingFrames ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" /> Zerhacken läuft...
-                      </>
-                    ) : (
-                      <>
-                        <Wand2 className="w-4 h-4" /> Video in Frames zerlegen
-                      </>
-                    )}
-                  </button>
+                  {/* Extract Button based on mode */}
+                  {extractMode === "single" ? (
+                    <button
+                      onClick={handleTriggerExtractFrames}
+                      disabled={!framesVideoFile || isExtractingFrames}
+                      className={`w-full py-3.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm ${
+                        !framesVideoFile || isExtractingFrames
+                          ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                          : "bg-blue-600 hover:bg-blue-700 text-white cursor-pointer active:scale-[0.99]"
+                      }`}
+                    >
+                      {isExtractingFrames ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" /> Zerhacken läuft...
+                        </>
+                      ) : (
+                        <>
+                          <Wand2 className="w-4 h-4" /> Video in Frames zerlegen
+                        </>
+                      )}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleTriggerBatchExtraction}
+                      disabled={projectVideos.length === 0 || isExtractingFrames}
+                      className={`w-full py-3.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm ${
+                        projectVideos.length === 0 || isExtractingFrames
+                          ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                          : "bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer active:scale-[0.99]"
+                      }`}
+                    >
+                      {isBatchExtracting ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" /> Batch-Extraktion läuft...
+                        </>
+                      ) : (
+                        <>
+                          <Wand2 className="w-4 h-4" /> Batch-Extraktion starten
+                        </>
+                      )}
+                    </button>
+                  )}
 
+                </div>
+
+                {/* CLEAR OUTPUT DIRECTORY PANEL */}
+                <div className="bg-rose-50/50 rounded-2xl border border-rose-100 p-5 space-y-3.5">
+                  <div className="flex items-start gap-2.5">
+                    <Trash2 className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
+                    <div>
+                      <h4 className="text-xs font-bold text-rose-950 uppercase tracking-wider">Output-Speicher aufräumen</h4>
+                      <p className="text-[11px] text-rose-700/80 leading-normal mt-0.5">
+                        Löscht alle extrahierten Frames und Schleifen-Videos vom Server, um Speicherplatz freizugeben.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleClearOutputs}
+                      disabled={isClearingOutputs}
+                      className="inline-flex items-center gap-1.5 bg-rose-600 hover:bg-rose-700 disabled:bg-rose-300 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition cursor-pointer"
+                    >
+                      {isClearingOutputs ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Wird geleert...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Output-Ordner leeren</span>
+                        </>
+                      )}
+                    </button>
+                    {clearStatusMessage && (
+                      <span className="text-[10px] text-emerald-600 font-bold font-mono animate-fade-in">{clearStatusMessage}</span>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -3246,8 +3986,10 @@ export default function App() {
 
                 {extractedFrames.length > 0 && (() => {
                   const activeIdx = selectedFrameIndex !== null ? selectedFrameIndex : 0;
-                  const activeFrameUrl = extractedFrames[activeIdx] || "";
-                  const activeFrameNum = activeIdx * everyXthFrame;
+                  const activeFrameObj = extractedFrames[activeIdx];
+                  const activeFrameUrl = activeFrameObj?.url || "";
+                  const activeFrameNum = activeFrameObj?.frameNum ?? (activeIdx * everyXthFrame);
+                  const activeVideoName = activeFrameObj?.videoName || "";
                   const timestampSec = activeFrameNum / 30; // Estimate based on 30fps standard
 
                   const formatFrameTimestamp = (sec: number) => {
@@ -3281,7 +4023,7 @@ export default function App() {
                             </span>
                             <h3 className="font-display font-semibold text-sm text-slate-100 flex items-center gap-1.5 mt-1">
                               <Eye className="w-4 h-4 text-blue-400" />
-                              Frame #{activeFrameNum} • Details & Vergrößerung
+                              {activeVideoName ? `${activeVideoName.slice(0, 30)}${activeVideoName.length > 30 ? "..." : ""} • ` : ""}Frame #{activeFrameNum} • Details & Vergrößerung
                             </h3>
                           </div>
                           <div className="flex items-center gap-2 font-mono text-xs text-slate-400">
@@ -3644,9 +4386,9 @@ export default function App() {
                         </div>
                         
                         <div className="flex overflow-x-auto gap-2 py-3 px-3 bg-slate-900 rounded-xl border border-slate-800 custom-scrollbar select-none">
-                          {extractedFrames.map((frameUrl, idx) => {
+                          {extractedFrames.map((frameObj, idx) => {
                             const isSelected = activeIdx === idx;
-                            const frameNum = idx * everyXthFrame;
+                            const frameNum = frameObj.frameNum;
                             return (
                               <div
                                 key={idx}
@@ -3658,15 +4400,15 @@ export default function App() {
                                 }`}
                               >
                                 <img
-                                  src={frameUrl}
+                                  src={frameObj.url}
                                   alt={`Thumb ${frameNum}`}
                                   className="w-full h-full object-cover"
                                   loading="lazy"
                                   referrerPolicy="no-referrer"
                                 />
                                 <div className="absolute inset-0 bg-black/35 group-hover:bg-transparent transition-colors"></div>
-                                <div className="absolute bottom-1 left-1 bg-black/80 px-1 py-0.5 rounded text-[8px] font-mono text-white leading-none">
-                                  #{frameNum}
+                                <div className="absolute bottom-1 left-1 bg-black/80 px-1 py-0.5 rounded text-[8px] font-mono text-white leading-none max-w-[90%] truncate">
+                                  {frameObj.videoName ? `${frameObj.videoName.slice(0, 10)}... ` : ""}#{frameNum}
                                 </div>
                                 {isSelected && (
                                   <div className="absolute top-1 right-1 bg-blue-500 w-2 h-2 rounded-full animate-ping"></div>
@@ -3704,8 +4446,8 @@ export default function App() {
                         </div>
                         
                         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 max-h-[400px] overflow-y-auto p-2 bg-gray-100/50 rounded-2xl border border-gray-150 shadow-inner">
-                          {extractedFrames.map((frameUrl, idx) => {
-                            const frameNum = idx * everyXthFrame;
+                          {extractedFrames.map((frameObj, idx) => {
+                            const frameNum = frameObj.frameNum;
                             const isSelected = activeIdx === idx;
                             return (
                               <div 
@@ -3717,13 +4459,13 @@ export default function App() {
                               >
                                 <div className="aspect-video bg-gray-900 relative overflow-hidden flex items-center justify-center">
                                   <img 
-                                    src={frameUrl} 
+                                    src={frameObj.url} 
                                     alt={`Frame ${frameNum}`}
                                     className="w-full h-full object-contain group-hover:scale-105 transition duration-300"
                                     referrerPolicy="no-referrer"
                                   />
-                                  <span className="absolute top-2 left-2 bg-black/70 text-white text-[9px] font-mono px-1.5 py-0.5 rounded backdrop-blur-xs font-semibold">
-                                    #{frameNum + 1}
+                                  <span className="absolute top-2 left-2 bg-black/70 text-white text-[9px] font-mono px-1.5 py-0.5 rounded backdrop-blur-xs font-semibold max-w-[80%] truncate">
+                                    {frameObj.videoName || "Video"}
                                   </span>
                                   {isSelected && (
                                     <span className="absolute top-2 right-2 bg-blue-600 text-white text-[9px] font-semibold px-2 py-0.5 rounded">
@@ -3734,11 +4476,11 @@ export default function App() {
                                 
                                 <div className="p-2 border-t border-gray-50 bg-gray-50/50 flex items-center justify-between gap-2">
                                   <span className="text-[10px] font-mono text-gray-500">
-                                    Frame {frameNum}
+                                    Frame #{frameNum}
                                   </span>
                                   <a
-                                    href={frameUrl}
-                                    download={`frame-${frameNum}.jpg`}
+                                    href={frameObj.url}
+                                    download={`${frameObj.videoName ? frameObj.videoName.replace(/\.[^/.]+$/, "") : "frame"}_frame-${frameNum}.jpg`}
                                     onClick={(e) => e.stopPropagation()}
                                     className="p-1 hover:bg-blue-50 text-blue-600 rounded-md transition-colors cursor-pointer"
                                     title="Einzelbild herunterladen"

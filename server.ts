@@ -5,6 +5,7 @@ import { exec } from "child_process";
 import multer from "multer";
 import { createServer as createViteServer } from "vite";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import os from "os";
 
 const app = express();
 const PORT = 3000;
@@ -148,6 +149,305 @@ app.post(
     }
   }
 );
+
+// Register a local video path without HTTP upload
+app.post("/api/register-local-path", async (req, res) => {
+  try {
+    const { localPath } = req.body;
+    if (!localPath) {
+      return res.status(400).json({ success: false, error: "Kein Pfad angegeben." });
+    }
+
+    const trimmedPath = localPath.trim();
+    if (!fs.existsSync(trimmedPath)) {
+      return res.status(400).json({ success: false, error: `Die Datei existiert nicht auf dem Server-Dateisystem: ${trimmedPath}` });
+    }
+
+    const stats = fs.statSync(trimmedPath);
+    if (!stats.isFile()) {
+      return res.status(400).json({ success: false, error: "Der angegebene Pfad ist keine Datei." });
+    }
+
+    const originalName = path.basename(trimmedPath);
+    const meta = await getMediaMetadata(trimmedPath);
+    
+    res.json({
+      success: true,
+      file: {
+        filename: originalName,
+        originalName: originalName,
+        path: trimmedPath,
+        fullPath: trimmedPath,
+        size: stats.size,
+        ...meta,
+      }
+    });
+  } catch (err: any) {
+    console.error("Fehler beim Registrieren des lokalen Pfads:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Helper to recursively find a file by name (shallow search first)
+const LOWER_SKIP_DIRS = new Set([
+  "node_modules", ".git", "library", "system", "dist", ".next", "$recycle.bin", "cache",
+  "appdata", "windows", "program files", "program files (x86)", "programdata", "microsoft",
+  "macos", "private", "system volume information", "volumes", "temp", "tmp", "caches",
+  "library/caches", "users/shared", "system/library"
+]);
+
+function findFileByName(baseDir: string, targetName: string, maxDepth = 8): string | null {
+  try {
+    const files = fs.readdirSync(baseDir);
+    // 1. Check files in current dir first (shallow search first is much faster!)
+    for (const file of files) {
+      const fullPath = path.join(baseDir, file);
+      try {
+        const stats = fs.statSync(fullPath);
+        if (stats.isFile() && file.toLowerCase() === targetName.toLowerCase()) {
+          return fullPath;
+        }
+      } catch (e) {}
+    }
+    
+    // 2. Deep search if not found in current dir
+    if (maxDepth > 0) {
+      for (const file of files) {
+        const fullPath = path.join(baseDir, file);
+        try {
+          const stats = fs.statSync(fullPath);
+          if (stats.isDirectory()) {
+            const lowerName = file.toLowerCase();
+            // Skip system and huge build/dependencies directories to prevent slowness or hanging
+            if (LOWER_SKIP_DIRS.has(lowerName)) {
+              continue;
+            }
+            const found = findFileByName(fullPath, targetName, maxDepth - 1);
+            if (found) return found;
+          }
+        } catch (e) {}
+      }
+    }
+  } catch (err) {}
+  return null;
+}
+
+// Locate file selected in browser native dialog on the local filesystem
+app.post("/api/locate-local-file", async (req, res) => {
+  try {
+    const { filename, baseSearchDir } = req.body;
+    if (!filename) {
+      return res.status(400).json({ success: false, error: "Kein Dateiname angegeben." });
+    }
+
+    // Determine where to search
+    let searchPaths: string[] = [];
+    if (baseSearchDir && baseSearchDir.trim()) {
+      searchPaths.push(baseSearchDir.trim());
+    }
+
+    // Add standard user folders
+    const home = os.homedir();
+    const commonDirs = [
+      path.join(home, "Videos"),
+      path.join(home, "Downloads"),
+      path.join(home, "Desktop"),
+      path.join(home, "Documents"),
+      path.join(home, "Movies"),
+      home,
+      process.cwd()
+    ];
+
+    // Add OneDrive folders
+    const oneDriveDirs = [
+      path.join(home, "OneDrive", "Desktop"),
+      path.join(home, "OneDrive", "Downloads"),
+      path.join(home, "OneDrive", "Videos"),
+      path.join(home, "OneDrive", "Documents")
+    ];
+
+    for (const dir of [...commonDirs, ...oneDriveDirs]) {
+      if (fs.existsSync(dir) && !searchPaths.includes(dir)) {
+        searchPaths.push(dir);
+      }
+    }
+
+    // Fallback: search on secondary Windows drives or macOS mount points
+    if (process.platform === "win32") {
+      const drives = ["c:\\", "d:\\", "e:\\", "f:\\", "g:\\", "h:\\", "i:\\", "j:\\"];
+      for (const d of drives) {
+        if (fs.existsSync(d) && !searchPaths.includes(d)) {
+          searchPaths.push(d);
+        }
+      }
+    } else {
+      const mounts = ["/Volumes", "/media", "/mnt"];
+      for (const m of mounts) {
+        if (fs.existsSync(m) && !searchPaths.includes(m)) {
+          searchPaths.push(m);
+        }
+      }
+    }
+
+    let foundPath: string | null = null;
+    for (const sPath of searchPaths) {
+      try {
+        if (fs.existsSync(sPath)) {
+          foundPath = findFileByName(sPath, filename);
+          if (foundPath) break;
+        }
+      } catch (e) {}
+    }
+
+    if (!foundPath) {
+      return res.status(404).json({
+        success: false,
+        error: `Die Datei "${filename}" wurde in keinem Suchpfad und auf keinem Laufwerk gefunden. Bitte verschiebe die Datei in deinen Videos- oder Downloads-Ordner oder stelle sicher, dass sie sich in dem Suchordner befindet.`
+      });
+    }
+
+    const stats = fs.statSync(foundPath);
+    const meta = await getMediaMetadata(foundPath);
+
+    res.json({
+      success: true,
+      file: {
+        filename: filename,
+        originalName: filename,
+        path: foundPath,
+        fullPath: foundPath,
+        size: stats.size,
+        ...meta,
+      }
+    });
+  } catch (err: any) {
+    console.error("Fehler bei der Lokalisierung:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Scan a directory and list found videos
+app.post("/api/list-local-videos", async (req, res) => {
+  try {
+    const { baseSearchDir } = req.body;
+    let searchPaths: string[] = [];
+    if (baseSearchDir && baseSearchDir.trim()) {
+      searchPaths.push(baseSearchDir.trim());
+    } else {
+      const home = os.homedir();
+      searchPaths = [
+        path.join(home, "Videos"),
+        path.join(home, "Downloads"),
+        path.join(home, "Desktop"),
+        home,
+        process.cwd()
+      ];
+    }
+
+    const videoExtensions = [".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"];
+    const foundVideos: any[] = [];
+
+    // Helper to collect videos
+    function collectVideos(dir: string, currentDepth = 0, maxDepth = 2) {
+      if (foundVideos.length >= 150) return;
+      try {
+        if (!fs.existsSync(dir)) return;
+        const stats = fs.statSync(dir);
+        if (!stats.isDirectory()) return;
+
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+          const fullPath = path.join(dir, file);
+          try {
+            const fStats = fs.statSync(fullPath);
+            if (fStats.isFile()) {
+              const ext = path.extname(file).toLowerCase();
+              if (videoExtensions.includes(ext)) {
+                foundVideos.push({
+                  filename: file,
+                  fullPath: fullPath,
+                  size: fStats.size,
+                  mtime: fStats.mtime
+                });
+                if (foundVideos.length >= 150) return;
+              }
+            } else if (fStats.isDirectory() && currentDepth < maxDepth) {
+              const lowerName = file.toLowerCase();
+              if (LOWER_SKIP_DIRS.has(lowerName)) {
+                continue;
+              }
+              collectVideos(fullPath, currentDepth + 1, maxDepth);
+            }
+          } catch (e) {}
+        }
+      } catch (err) {}
+    }
+
+    for (const sPath of searchPaths) {
+      if (fs.existsSync(sPath)) {
+        collectVideos(sPath, 0, 2);
+      }
+    }
+
+    // Sort by modification time (newest first)
+    foundVideos.sort((a, b) => {
+      try {
+        return new Date(b.mtime).getTime() - new Date(a.mtime).getTime();
+      } catch (e) {
+        return 0;
+      }
+    });
+
+    res.json({
+      success: true,
+      videos: foundVideos.slice(0, 100)
+    });
+  } catch (err: any) {
+    console.error("Error listing videos:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Verify if a local search directory exists and is readable
+app.post("/api/verify-directory", async (req, res) => {
+  try {
+    const { dirPath } = req.body;
+    if (!dirPath || !dirPath.trim()) {
+      return res.json({ success: true, exists: false, message: "Standard-Verzeichnisse werden verwendet." });
+    }
+
+    const trimmed = dirPath.trim();
+    if (!fs.existsSync(trimmed)) {
+      return res.json({ success: false, exists: false, message: `Der Pfad existiert nicht: ${trimmed}` });
+    }
+
+    const stats = fs.statSync(trimmed);
+    if (!stats.isDirectory()) {
+      return res.json({ success: false, exists: false, message: "Der angegebene Pfad ist kein Ordner, sondern eine Datei." });
+    }
+
+    try {
+      const items = fs.readdirSync(trimmed);
+      const videoExtensions = [".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"];
+      const videoCount = items.filter(f => {
+        const ext = path.extname(f).toLowerCase();
+        return videoExtensions.includes(ext);
+      }).length;
+
+      return res.json({
+        success: true,
+        exists: true,
+        message: `Ordner erfolgreich verbunden! Gefundene Videos auf Hauptebene: ${videoCount}`,
+        videoCount
+      });
+    } catch (readErr: any) {
+      return res.json({ success: false, exists: true, message: `Ordner existiert, kann aber nicht gelesen werden: ${readErr.message}` });
+    }
+  } catch (err: any) {
+    console.error("Fehler bei Verzeichnisprüfung:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // Unified Video Blending Pipeline
 app.post("/api/blend", async (req: any, res) => {
@@ -695,6 +995,32 @@ app.post("/api/extract-frames", async (req: any, res) => {
     } catch (e) {}
 
     res.status(500).json({ success: false, error: err.message || "Fehler bei der Frame-Extraktion." });
+  }
+});
+
+// Endpoint to clear the outputs directory
+app.post("/api/clear-outputs", (req, res) => {
+  try {
+    const files = fs.readdirSync(OUTPUTS_DIR);
+    let deletedCount = 0;
+    for (const file of files) {
+      const filePath = path.join(OUTPUTS_DIR, file);
+      try {
+        if (fs.statSync(filePath).isFile()) {
+          fs.unlinkSync(filePath);
+          deletedCount++;
+        } else {
+          fs.rmSync(filePath, { recursive: true, force: true });
+          deletedCount++;
+        }
+      } catch (err) {
+        console.warn(`Could not delete file ${file}:`, err);
+      }
+    }
+    res.json({ success: true, message: `${deletedCount} Elemente aus dem Output-Ordner gelöscht.` });
+  } catch (error: any) {
+    console.error("Fehler beim Leeren des Output-Ordners:", error);
+    res.status(500).json({ success: false, error: "Fehler beim Leeren des Ordners: " + error.message });
   }
 });
 
