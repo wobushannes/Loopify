@@ -627,7 +627,7 @@ app.post("/api/change-resolution", async (req: any, res) => {
 
 // Video Frame Extractor API Endpoint (Video in Frames zerhacken)
 app.post("/api/extract-frames", async (req: any, res) => {
-  const { videoPath, everyXthFrame } = req.body;
+  const { videoPath, everyXthFrame, resolution = "original" } = req.body;
 
   if (!videoPath || !fs.existsSync(videoPath)) {
     return res.status(400).json({ success: false, error: "Ungültiger oder fehlender Videopfad." });
@@ -642,10 +642,21 @@ app.post("/api/extract-frames", async (req: any, res) => {
   // Frame pattern
   const outputPattern = path.join(OUTPUTS_DIR, `frame-${taskId}-%04d.jpg`);
 
-  // We use scale=480:-2 to make frame extraction fast and keep image sizes manageable for the UI
-  const extractCmd = `"${ffmpegCmd}" -y -i "${videoPath}" -vf "select='not(mod(n,${step}))',scale=480:-2" -vsync vfr "${outputPattern}"`;
+  let scaleFilter = "";
+  if (resolution === "3840") {
+    scaleFilter = ",scale=3840:-2";
+  } else if (resolution === "1920") {
+    scaleFilter = ",scale=1920:-2";
+  } else if (resolution === "1280") {
+    scaleFilter = ",scale=1280:-2";
+  } else if (resolution === "480") {
+    scaleFilter = ",scale=480:-2";
+  }
 
-  console.log(`Extracting every ${step}-th frame from ${videoPath}: ${extractCmd}`);
+  // We add -q:v 2 to ensure highest possible JPEG quality (sharp frames, no compression artifacts)
+  const extractCmd = `"${ffmpegCmd}" -y -i "${videoPath}" -vf "select='not(mod(n,${step}))'${scaleFilter}" -q:v 2 -vsync vfr "${outputPattern}"`;
+
+  console.log(`Extracting every ${step}-th frame with resolution ${resolution} from ${videoPath}: ${extractCmd}`);
 
   try {
     await new Promise<void>((resolve, reject) => {

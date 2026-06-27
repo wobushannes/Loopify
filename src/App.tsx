@@ -96,6 +96,8 @@ export default function App() {
   const [showFrameGrid, setShowFrameGrid] = useState<boolean>(false);
   const [isDownloadingZip, setIsDownloadingZip] = useState<boolean>(false);
   const [zipProgress, setZipProgress] = useState<string>("");
+  const [extractResolution, setExtractResolution] = useState<string>("original");
+  const [extractedResolutionUsed, setExtractedResolutionUsed] = useState<string>("original");
 
   // Mixer parameters
   const [cropConfig, setCropConfig] = useState<CropSelection>({ x: 0, y: 0, width: 200, height: 200 });
@@ -847,6 +849,7 @@ export default function App() {
         body: JSON.stringify({
           videoPath: framesVideoFile.fullPath,
           everyXthFrame: everyXthFrame,
+          resolution: extractResolution,
         }),
       });
 
@@ -855,6 +858,7 @@ export default function App() {
         setExtractedFrames(data.frames);
         setTotalExtractedCount(data.totalCount);
         setSelectedFrameIndex(0);
+        setExtractedResolutionUsed(extractResolution);
       } else {
         setProcessError(data.error || "Fehler beim Extrahieren der Frames.");
       }
@@ -3146,6 +3150,50 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* Step 3: Resolution setting */}
+                  <div className="space-y-2 pt-1">
+                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center justify-between">
+                      <span>3. Extraktions-Auflösung</span>
+                      <span className="text-blue-600 font-mono font-bold">
+                        {extractResolution === "original"
+                          ? "Original (Bestmögliche)"
+                          : extractResolution === "3840"
+                          ? "4K UHD (3840px)"
+                          : extractResolution === "1920"
+                          ? "Full HD (1920px)"
+                          : extractResolution === "1280"
+                          ? "HD Ready (1280px)"
+                          : "SD Speed (480px)"}
+                      </span>
+                    </label>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { value: "original", label: "Original (Beste)", desc: "Volle Videoauflösung" },
+                        { value: "3840", label: "4K UHD", desc: "3840px Breite" },
+                        { value: "1920", label: "Full HD", desc: "1920px Breite" },
+                        { value: "1280", label: "HD Ready", desc: "1280px Breite" },
+                        { value: "480", label: "SD Speed", desc: "480px Breite" },
+                      ].map((item) => (
+                        <button
+                          key={item.value}
+                          type="button"
+                          onClick={() => setExtractResolution(item.value)}
+                          className={`p-2 rounded-xl border text-left transition flex flex-col justify-between ${
+                            item.value === "original" ? "col-span-2" : ""
+                          } ${
+                            extractResolution === item.value
+                              ? "bg-blue-50 text-blue-900 border-blue-500 ring-2 ring-blue-100"
+                              : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 hover:border-gray-300"
+                          }`}
+                        >
+                          <span className="text-[11px] font-bold block">{item.label}</span>
+                          <span className="text-[9px] text-gray-400 font-normal leading-tight">{item.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
                   <button
                     onClick={handleTriggerExtractFrames}
                     disabled={!framesVideoFile || isExtractingFrames}
@@ -3497,7 +3545,25 @@ export default function App() {
                                   <div className="grid grid-cols-2 gap-y-1 bg-slate-900/60 p-2 rounded border border-slate-800/40">
                                     <span className="text-slate-500">Extrahierte Größe:</span>
                                     <span className="text-white font-bold text-right">
-                                      480 × {framesVideoFile ? Math.round(480 * (framesVideoFile.height / framesVideoFile.width)) : 270} px
+                                      {(() => {
+                                        if (!framesVideoFile) return "Unbekannt";
+                                        let w = framesVideoFile.width;
+                                        let h = framesVideoFile.height;
+                                        if (extractedResolutionUsed === "3840") {
+                                          w = 3840;
+                                          h = Math.round(3840 * (framesVideoFile.height / framesVideoFile.width));
+                                        } else if (extractedResolutionUsed === "1920") {
+                                          w = 1920;
+                                          h = Math.round(1920 * (framesVideoFile.height / framesVideoFile.width));
+                                        } else if (extractedResolutionUsed === "1280") {
+                                          w = 1280;
+                                          h = Math.round(1280 * (framesVideoFile.height / framesVideoFile.width));
+                                        } else if (extractedResolutionUsed === "480") {
+                                          w = 480;
+                                          h = Math.round(480 * (framesVideoFile.height / framesVideoFile.width));
+                                        }
+                                        return `${w} × ${h} px`;
+                                      })()}
                                     </span>
 
                                     <span className="text-slate-500">Original-Größe:</span>
