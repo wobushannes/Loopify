@@ -575,6 +575,118 @@ app.post("/api/concat-videos", async (req: any, res) => {
   }
 });
 
+// Video Resolution Changer API Endpoint (Auflösung ändern)
+app.post("/api/change-resolution", async (req: any, res) => {
+  const { videoPath, targetHeight } = req.body;
+
+  if (!videoPath || !fs.existsSync(videoPath)) {
+    return res.status(400).json({ success: false, error: "Ungültiger oder fehlender Videopfad." });
+  }
+
+  const height = parseInt(targetHeight, 10);
+  if (isNaN(height) || height <= 0) {
+    return res.status(400).json({ success: false, error: "Ungültige Zielauflösung." });
+  }
+
+  const taskId = Date.now();
+  const outputFilename = `resized-${taskId}.mp4`;
+  const outputPath = path.join(OUTPUTS_DIR, outputFilename);
+
+  // scale=-2:height maintains aspect ratio and keeps width divisible by 2 (required for libx264)
+  const resizeCmd = `"${ffmpegCmd}" -y -i "${videoPath}" -vf "scale=-2:${height}" -c:v libx264 -pix_fmt yuv420p -c:a copy "${outputPath}"`;
+
+  console.log(`Resizing video ${videoPath} to height ${height}: ${resizeCmd}`);
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      exec(resizeCmd, (err, stdout, stderr) => {
+        if (err) {
+          console.error("Resizing error output:", stderr);
+          reject(new Error("Fehler beim Ändern der Videoauflösung."));
+        } else {
+          resolve();
+        }
+      });
+    });
+
+    const finalMeta = await getMediaMetadata(outputPath);
+
+    res.json({
+      success: true,
+      videoUrl: `/outputs/${outputFilename}`,
+      meta: finalMeta
+    });
+  } catch (err: any) {
+    console.error(err);
+    if (fs.existsSync(outputPath)) {
+      try { fs.unlinkSync(outputPath); } catch (e) {}
+    }
+    res.status(500).json({ success: false, error: err.message || "Fehler bei der Auflösungsänderung." });
+  }
+});
+
+// Video Frame Extractor API Endpoint (Video in Frames zerhacken)
+app.post("/api/extract-frames", async (req: any, res) => {
+  const { videoPath, everyXthFrame } = req.body;
+
+  if (!videoPath || !fs.existsSync(videoPath)) {
+    return res.status(400).json({ success: false, error: "Ungültiger oder fehlender Videopfad." });
+  }
+
+  const step = parseInt(everyXthFrame, 10);
+  if (isNaN(step) || step <= 0) {
+    return res.status(400).json({ success: false, error: "Der Frame-Abstand muss mindestens 1 betragen." });
+  }
+
+  const taskId = Date.now();
+  // Frame pattern
+  const outputPattern = path.join(OUTPUTS_DIR, `frame-${taskId}-%04d.jpg`);
+
+  // We use scale=480:-2 to make frame extraction fast and keep image sizes manageable for the UI
+  const extractCmd = `"${ffmpegCmd}" -y -i "${videoPath}" -vf "select='not(mod(n,${step}))',scale=480:-2" -vsync vfr "${outputPattern}"`;
+
+  console.log(`Extracting every ${step}-th frame from ${videoPath}: ${extractCmd}`);
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      exec(extractCmd, (err, stdout, stderr) => {
+        if (err) {
+          console.error("Frame extraction error:", stderr);
+          reject(new Error("Fehler beim Extrahieren der Frames aus dem Video."));
+        } else {
+          resolve();
+        }
+      });
+    });
+
+    // Read OUTPUTS_DIR to find all files matching frame-taskId-*.jpg
+    const files = fs.readdirSync(OUTPUTS_DIR);
+    const frameFiles = files
+      .filter(f => f.startsWith(`frame-${taskId}-`) && f.endsWith(".jpg"))
+      .sort()
+      .map(f => `/outputs/${f}`);
+
+    res.json({
+      success: true,
+      frames: frameFiles,
+      totalCount: frameFiles.length
+    });
+  } catch (err: any) {
+    console.error(err);
+    // Cleanup any partially generated files
+    try {
+      const files = fs.readdirSync(OUTPUTS_DIR);
+      files.forEach(f => {
+        if (f.startsWith(`frame-${taskId}-`)) {
+          try { fs.unlinkSync(path.join(OUTPUTS_DIR, f)); } catch (e) {}
+        }
+      });
+    } catch (e) {}
+
+    res.status(500).json({ success: false, error: err.message || "Fehler bei der Frame-Extraktion." });
+  }
+});
+
 // Start backend server
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {

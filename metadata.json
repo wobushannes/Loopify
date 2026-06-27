@@ -1,6 +1,6 @@
 {
-  "name": "Seamless Video Looper and Audio Overlay",
-  "description": "An interactive utility to crop visual areas of videos, extract soundtracks, and seamlessly loop trimmed segments perfectly synced to the audio duration.",
+  "name": "Video Susi",
+  "description": "An interactive utility to crop visual areas of videos, extract soundtracks, extract frames with a click as a zipped archive, view precise exFAT frame metadata, and seamlessly loop trimmed segments perfectly synced to the audio duration.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

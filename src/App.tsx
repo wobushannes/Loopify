@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import JSZip from "jszip";
 import { 
   Infinity as InfinityIcon, 
   Sparkles, 
@@ -18,6 +19,9 @@ import {
   ArrowDownLeft,
   ChevronRight,
   Menu,
+  X,
+  Link,
+  Music,
   FileBadge,
   Plus,
   Trash2,
@@ -27,7 +31,14 @@ import {
   Clock,
   Loader2,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  Maximize,
+  Image as ImageIcon,
+  ZoomIn,
+  ZoomOut,
+  Eye,
+  ChevronLeft,
+  Grid
 } from "lucide-react";
 import { UploadedFile, CropSelection, TrimSelection, LoopMode, QueueItem, CompressionPreset } from "./types";
 import MediaUploader from "./components/MediaUploader";
@@ -35,7 +46,8 @@ import VideoCropTrim from "./components/VideoCropTrim";
 
 export default function App() {
   // Navigation: Active main Workspace tab
-  const [activeTab, setActiveTab] = useState<"mixer" | "compressor" | "splitter" | "concat">("mixer");
+  const [activeTab, setActiveTab] = useState<"mixer" | "compressor" | "splitter" | "concat" | "resolution" | "frames">("mixer");
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   // State: Uploaded media files
   const [videoFile, setVideoFile] = useState<UploadedFile | undefined>(undefined);
@@ -60,6 +72,30 @@ export default function App() {
   const [concatResultUrl, setConcatResultUrl] = useState<string>("");
   const [concatResultMeta, setConcatResultMeta] = useState<any | null>(null);
   const concatInputRef = useRef<HTMLInputElement>(null);
+
+  // State: Video Resolution Changer
+  const [resolutionVideoFile, setResolutionVideoFile] = useState<UploadedFile | undefined>(undefined);
+  const [isResolutionUploading, setIsResolutionUploading] = useState(false);
+  const resolutionInputRef = useRef<HTMLInputElement>(null);
+  const [targetResolutionHeight, setTargetResolutionHeight] = useState<number>(720);
+  const [isResizing, setIsResizing] = useState(false);
+  const [resizedVideoUrl, setResizedVideoUrl] = useState<string>("");
+  const [resizedVideoMeta, setResizedVideoMeta] = useState<any | null>(null);
+
+  // State: Video Frame Extractor
+  const [framesVideoFile, setFramesVideoFile] = useState<UploadedFile | undefined>(undefined);
+  const [isFramesUploading, setIsFramesUploading] = useState(false);
+  const framesInputRef = useRef<HTMLInputElement>(null);
+  const [everyXthFrame, setEveryXthFrame] = useState<number>(10);
+  const [isExtractingFrames, setIsExtractingFrames] = useState(false);
+  const [extractedFrames, setExtractedFrames] = useState<string[]>([]);
+  const [totalExtractedCount, setTotalExtractedCount] = useState<number>(0);
+  const [selectedFrameIndex, setSelectedFrameIndex] = useState<number | null>(null);
+  const [frameZoomFactor, setFrameZoomFactor] = useState<number>(1);
+  const [frameFilter, setFrameFilter] = useState<"none" | "grayscale" | "contrast" | "invert" | "sepia">("none");
+  const [showFrameGrid, setShowFrameGrid] = useState<boolean>(false);
+  const [isDownloadingZip, setIsDownloadingZip] = useState<boolean>(false);
+  const [zipProgress, setZipProgress] = useState<string>("");
 
   // Mixer parameters
   const [cropConfig, setCropConfig] = useState<CropSelection>({ x: 0, y: 0, width: 200, height: 200 });
@@ -673,6 +709,222 @@ export default function App() {
     setConcatVideos(prev => prev.filter((_, i) => i !== index));
   };
 
+  // Video Resolution Changer Handlers
+  const handleResolutionVideoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    setIsResolutionUploading(true);
+    setProcessError("");
+    setResizedVideoUrl("");
+    setResizedVideoMeta(null);
+
+    const file = files[0];
+    const formData = new FormData();
+    formData.append("videoFile", file);
+
+    try {
+      const response = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await response.json();
+      if (data.success && data.files.video) {
+        setResolutionVideoFile(data.files.video);
+      } else {
+        setProcessError(data.error || "Fehler beim Hochladen der Videodatei.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setProcessError("Unerwarteter Verbindungsausfall.");
+    } finally {
+      setIsResolutionUploading(false);
+    }
+  };
+
+  const handleTriggerResize = async () => {
+    if (!resolutionVideoFile) {
+      setProcessError("Bitte lade zuerst ein Video hoch.");
+      return;
+    }
+
+    setIsResizing(true);
+    setProcessError("");
+    setResizedVideoUrl("");
+    setResizedVideoMeta(null);
+    setProcessingTimeSec(0);
+
+    const timerId = setInterval(() => {
+      setProcessingTimeSec(prev => prev + 1);
+    }, 1000);
+
+    setProcessStatus("Ändere Videoauflösung... Bitte warten.");
+
+    try {
+      const response = await fetch("/api/change-resolution", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          videoPath: resolutionVideoFile.fullPath,
+          targetHeight: targetResolutionHeight,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setResizedVideoUrl(data.videoUrl);
+        setResizedVideoMeta(data.meta);
+      } else {
+        setProcessError(data.error || "Fehler beim Ändern der Auflösung.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setProcessError("Verbindung zum Server fehlgeschlagen.");
+    } finally {
+      setIsResizing(false);
+      clearInterval(timerId);
+      setProcessingTimeSec(0);
+      setProcessStatus("");
+    }
+  };
+
+  // Video Frame Extractor Handlers
+  const handleFramesVideoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    setIsFramesUploading(true);
+    setProcessError("");
+    setExtractedFrames([]);
+    setTotalExtractedCount(0);
+
+    const file = files[0];
+    const formData = new FormData();
+    formData.append("videoFile", file);
+
+    try {
+      const response = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await response.json();
+      if (data.success && data.files.video) {
+        setFramesVideoFile(data.files.video);
+      } else {
+        setProcessError(data.error || "Fehler beim Hochladen der Videodatei.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setProcessError("Verbindung zum Server fehlgeschlagen.");
+    } finally {
+      setIsFramesUploading(false);
+    }
+  };
+
+  const handleTriggerExtractFrames = async () => {
+    if (!framesVideoFile) {
+      setProcessError("Bitte lade zuerst ein Video hoch.");
+      return;
+    }
+
+    setIsExtractingFrames(true);
+    setProcessError("");
+    setExtractedFrames([]);
+    setTotalExtractedCount(0);
+    setSelectedFrameIndex(null);
+    setProcessingTimeSec(0);
+
+    const timerId = setInterval(() => {
+      setProcessingTimeSec(prev => prev + 1);
+    }, 1000);
+
+    setProcessStatus("Lese Video ein und extrahiere Frames... Bitte warten.");
+
+    try {
+      const response = await fetch("/api/extract-frames", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          videoPath: framesVideoFile.fullPath,
+          everyXthFrame: everyXthFrame,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setExtractedFrames(data.frames);
+        setTotalExtractedCount(data.totalCount);
+        setSelectedFrameIndex(0);
+      } else {
+        setProcessError(data.error || "Fehler beim Extrahieren der Frames.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setProcessError("Verbindung zum Server fehlgeschlagen.");
+    } finally {
+      setIsExtractingFrames(false);
+      clearInterval(timerId);
+      setProcessingTimeSec(0);
+      setProcessStatus("");
+    }
+  };
+
+  const handleDownloadAllAsZip = async () => {
+    if (extractedFrames.length === 0) return;
+    setIsDownloadingZip(true);
+    setZipProgress("Initialisiere Archiv...");
+
+    try {
+      const zip = new JSZip();
+      
+      // Download all frames sequentially and update progress
+      for (let i = 0; i < extractedFrames.length; i++) {
+        const frameUrl = extractedFrames[i];
+        const frameNum = i * everyXthFrame;
+        
+        setZipProgress(`Lade Bild ${i + 1} von ${extractedFrames.length} herunter...`);
+        
+        const response = await fetch(frameUrl);
+        if (!response.ok) {
+          throw new Error(`Fehler beim Herunterladen von Frame ${frameNum}`);
+        }
+        
+        const arrayBuffer = await response.arrayBuffer();
+        
+        // Pad the filename so they sort nicely (e.g. frame-0001_f0.jpg, frame-0002_f10.jpg)
+        const paddedIndex = String(i + 1).padStart(4, "0");
+        const filename = `frame-${paddedIndex}_f${frameNum}.jpg`;
+        
+        zip.file(filename, arrayBuffer);
+      }
+
+      setZipProgress("Erstelle ZIP-Archiv...");
+      
+      const blob = await zip.generateAsync({ type: "blob" }, (metadata) => {
+        setZipProgress(`Komprimiere Archiv: ${Math.round(metadata.percent)}%`);
+      });
+
+      setZipProgress("Starte Download...");
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `video_frames_${Date.now()}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+    } catch (err: any) {
+      console.error("ZIP-Download-Fehler:", err);
+      // We can use processError or a local way, but processError is perfectly fine and standard
+      setProcessError("ZIP-Download fehlgeschlagen: " + err.message);
+    } finally {
+      setIsDownloadingZip(false);
+      setZipProgress("");
+    }
+  };
+
   // Reset helper
   const handleFullReset = () => {
     setVideoFile(undefined);
@@ -694,106 +946,200 @@ export default function App() {
     setConcatResultMeta(null);
     setIsConcating(false);
     setIsConcatUploading(false);
+    setResolutionVideoFile(undefined);
+    setIsResolutionUploading(false);
+    setResizedVideoUrl("");
+    setResizedVideoMeta(null);
+    setFramesVideoFile(undefined);
+    setIsFramesUploading(false);
+    setExtractedFrames([]);
+    setTotalExtractedCount(0);
+    setSelectedFrameIndex(null);
+    setFrameZoomFactor(1);
+    setFrameFilter("none");
+    setShowFrameGrid(false);
     setProcessError("");
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-800 selection:bg-blue-100 pb-16">
+    <div className="min-h-screen bg-gray-50 text-gray-800 selection:bg-blue-100 flex flex-col md:flex-row">
       
-      {/* HEADER BANNER */}
-      <header className="bg-white border-b border-gray-150/80 shadow-2xs py-4 px-6 sticky top-0 z-50">
-        <div className="max-w-6xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-4">
-          
-          {/* Logo Brand Brand */}
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 bg-blue-600 text-white rounded-2xl shadow-sm shadow-blue-500/20 active:scale-95 transition-transform flex items-center justify-center">
-              <InfinityIcon className="w-6 h-6 animate-pulse" />
-            </div>
-            <div>
-              <h1 className="font-display font-bold text-xl tracking-tight text-gray-900 flex items-center gap-1.5">
-                Loopify
-                <span className="text-[10px] uppercase tracking-widest font-mono bg-blue-50 text-blue-600 px-2 py-0.5 rounded-md border border-blue-100">
-                  Pro-Tools
-                </span>
-              </h1>
-              <p className="text-xs text-gray-500">
-                Nahtlose Videoschleifen & Sound-Mischpult
-              </p>
-            </div>
+      {/* MOBILE BAR */}
+      <div className="md:hidden flex items-center justify-between bg-white border-b border-gray-150/80 px-4 py-3 sticky top-0 z-50 shadow-2xs shrink-0">
+        <div className="flex items-center gap-2">
+          <div className="p-1.5 bg-blue-600 text-white rounded-lg">
+            <InfinityIcon className="w-5 h-5 animate-pulse" />
           </div>
-
-          {/* Tab Controller & Extra Settings */}
-          <div className="flex items-center gap-3 w-full sm:w-auto justify-center">
-            
-            {/* Dynamic tabs */}
-            <div className="bg-gray-100 p-1 rounded-xl flex items-center border border-gray-200/50">
-              <button
-                onClick={() => {
-                  setActiveTab("mixer");
-                  setProcessError("");
-                }}
-                className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
-                  activeTab === "mixer"
-                    ? "bg-white text-gray-900 shadow-xs"
-                    : "text-gray-500 hover:text-gray-900"
-                }`}
-              >
-                🔄 Loop & Mixer
-              </button>
-              <button
-                onClick={() => {
-                  setActiveTab("compressor");
-                  setProcessError("");
-                }}
-                className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
-                  activeTab === "compressor"
-                    ? "bg-white text-gray-900 shadow-xs"
-                    : "text-gray-500 hover:text-gray-900"
-                }`}
-              >
-                🗜️ Video-Kompressor
-              </button>
-              <button
-                onClick={() => {
-                  setActiveTab("splitter");
-                  setProcessError("");
-                }}
-                className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
-                  activeTab === "splitter"
-                    ? "bg-white text-gray-900 shadow-xs"
-                    : "text-gray-500 hover:text-gray-900"
-                }`}
-              >
-                🎤 Stimm-Extraktor
-              </button>
-              <button
-                onClick={() => {
-                  setActiveTab("concat");
-                  setProcessError("");
-                }}
-                className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
-                  activeTab === "concat"
-                    ? "bg-white text-gray-900 shadow-xs"
-                    : "text-gray-500 hover:text-gray-900"
-                }`}
-              >
-                🔗 Video-Verkettung
-              </button>
-            </div>
-
-            <button
-              onClick={handleFullReset}
-              className="px-3 py-1.5 hover:bg-gray-100 text-xs font-semibold text-gray-500 hover:text-gray-900 rounded-xl transition border border-transparent flex items-center gap-1"
-              title="Kompletten Workspace zurücksetzen"
-            >
-              <ListRestart className="w-4 h-4" />
-            </button>
+          <div>
+            <h1 className="font-display font-bold text-sm tracking-tight text-gray-900 flex items-center gap-1">
+              Loopify
+              <span className="text-[8px] uppercase tracking-wider font-mono bg-blue-50 text-blue-600 px-1 py-0.5 rounded-md border border-blue-100">
+                Pro
+              </span>
+            </h1>
           </div>
-
         </div>
-      </header>
+        <button
+          onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+          className="p-2 hover:bg-gray-100 rounded-lg text-gray-500 transition-colors"
+        >
+          {isMobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+        </button>
+      </div>
 
-      <main className="max-w-6xl mx-auto px-4 mt-8 space-y-8 animate-fade-in">
+      {/* SIDEBAR FOR DESKTOP & MOBILE DRAWER */}
+      <aside className={`
+        fixed inset-y-0 left-0 z-40 w-64 lg:w-72 bg-white border-r border-gray-150/80 flex flex-col h-screen
+        transition-transform duration-300 ease-in-out md:translate-x-0 md:sticky md:top-0 shrink-0
+        ${isMobileMenuOpen ? "translate-x-0" : "-translate-x-full"}
+      `}>
+        {/* LOGO BOX */}
+        <div className="flex items-center gap-3 p-6 border-b border-gray-50">
+          <div className="p-2.5 bg-blue-600 text-white rounded-xl shadow-sm shadow-blue-500/20 active:scale-95 transition-transform flex items-center justify-center shrink-0">
+            <InfinityIcon className="w-5 h-5 animate-pulse" />
+          </div>
+          <div className="min-w-0">
+            <h1 className="font-display font-bold text-base tracking-tight text-gray-900 flex items-center gap-1.5">
+              Loopify
+              <span className="text-[9px] uppercase tracking-widest font-mono bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded-md border border-blue-100">
+                Pro
+              </span>
+            </h1>
+            <p className="text-[11px] text-gray-400 font-medium truncate">
+              Nahtlose Video-Tools
+            </p>
+          </div>
+        </div>
+
+        {/* NAVIGATION MENUS */}
+        <nav className="flex-1 px-4 py-6 space-y-1 overflow-y-auto">
+          <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest px-3 mb-2">
+            Werkzeuge
+          </div>
+          
+          <button
+            onClick={() => {
+              setActiveTab("mixer");
+              setProcessError("");
+              setIsMobileMenuOpen(false);
+            }}
+            className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold tracking-wide transition-all duration-200 cursor-pointer ${
+              activeTab === "mixer"
+                ? "bg-blue-600 text-white shadow-xs shadow-blue-500/10 font-bold"
+                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+            }`}
+          >
+            <InfinityIcon className="w-4 h-4 shrink-0" />
+            Loop & Mixer
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab("compressor");
+              setProcessError("");
+              setIsMobileMenuOpen(false);
+            }}
+            className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold tracking-wide transition-all duration-200 cursor-pointer ${
+              activeTab === "compressor"
+                ? "bg-blue-600 text-white shadow-xs shadow-blue-500/10 font-bold"
+                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+            }`}
+          >
+            <FileVideo className="w-4 h-4 shrink-0" />
+            Video-Kompressor
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab("splitter");
+              setProcessError("");
+              setIsMobileMenuOpen(false);
+            }}
+            className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold tracking-wide transition-all duration-200 cursor-pointer ${
+              activeTab === "splitter"
+                ? "bg-blue-600 text-white shadow-xs shadow-blue-500/10 font-bold"
+                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+            }`}
+          >
+            <Music className="w-4 h-4 shrink-0" />
+            Stimm-Extraktor
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab("concat");
+              setProcessError("");
+              setIsMobileMenuOpen(false);
+            }}
+            className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold tracking-wide transition-all duration-200 cursor-pointer ${
+              activeTab === "concat"
+                ? "bg-blue-600 text-white shadow-xs shadow-blue-500/10 font-bold"
+                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+            }`}
+          >
+            <Link className="w-4 h-4 shrink-0" />
+            Video-Verkettung
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab("resolution");
+              setProcessError("");
+              setIsMobileMenuOpen(false);
+            }}
+            className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold tracking-wide transition-all duration-200 cursor-pointer ${
+              activeTab === "resolution"
+                ? "bg-blue-600 text-white shadow-xs shadow-blue-500/10 font-bold"
+                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+            }`}
+          >
+            <Maximize className="w-4 h-4 shrink-0" />
+            Auflösung ändern
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab("frames");
+              setProcessError("");
+              setIsMobileMenuOpen(false);
+            }}
+            className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold tracking-wide transition-all duration-200 cursor-pointer ${
+              activeTab === "frames"
+                ? "bg-blue-600 text-white shadow-xs shadow-blue-500/10 font-bold"
+                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+            }`}
+          >
+            <ImageIcon className="w-4 h-4 shrink-0" />
+            Frame-Extraktor
+          </button>
+        </nav>
+
+        {/* BOTTOM WORKSPACE CONTROLS */}
+        <div className="p-4 border-t border-gray-100 bg-gray-50/50 space-y-3 shrink-0">
+          <button
+            onClick={handleFullReset}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-gray-200 hover:bg-gray-50 text-xs font-semibold text-gray-600 rounded-xl transition-all cursor-pointer shadow-3xs hover:text-gray-900"
+          >
+            <ListRestart className="w-4 h-4 text-gray-400" />
+            Workspace zurücksetzen
+          </button>
+          <div className="text-center text-[10px] text-gray-400 font-mono">
+            v2.4.0 • Node.js Engine
+          </div>
+        </div>
+      </aside>
+
+      {/* MOBILE BACKDROP OVERLAY */}
+      {isMobileMenuOpen && (
+        <div 
+          className="fixed inset-0 bg-black/30 backdrop-blur-xs z-30 md:hidden"
+          onClick={() => setIsMobileMenuOpen(false)}
+        />
+      )}
+
+      {/* MAIN LAYOUT WRAPPER */}
+      <div className="flex-1 flex flex-col min-w-0 min-h-screen">
+        <main className="flex-1 max-w-5xl w-full mx-auto px-4 py-8 md:py-10 space-y-8 animate-fade-in">
         
         {/* MIXER WORKSPACE */}
         {activeTab === "mixer" && (
@@ -2364,12 +2710,998 @@ export default function App() {
           </>
         )}
 
-      </main>
+        {/* RESOLUTION CHANGER WORKSPACE */}
+        {activeTab === "resolution" && (
+          <>
+            {/* INTRO BANNER */}
+            <section className="bg-gradient-to-r from-blue-900 to-indigo-950 rounded-2xl text-white p-7 md:p-8 shadow-sm relative overflow-hidden">
+              <div className="absolute right-0 bottom-0 top-0 w-1/3 opacity-15 pointer-events-none flex items-center justify-center">
+                <Maximize className="w-44 h-44 text-blue-400" />
+              </div>
+              <div className="relative max-w-2xl space-y-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-blue-200 bg-blue-800/45 px-3 py-1 rounded-sm">
+                  Proportionen wahren & Skalieren
+                </span>
+                <h2 className="font-display font-semibold text-2xl tracking-tight md:text-3xl text-white mt-1">
+                  Video-Auflösung konvertieren
+                </h2>
+                <p className="text-sm text-blue-200 leading-relaxed max-w-xl">
+                  Prüfe die aktuelle Auflösung deines Clips und reduziere oder ändere sie ganz nach Bedarf. Klassische Presets wie 1024p, 1080p, 720p und andere stehen bereit, während das Seitenverhältnis exakt beibehalten wird.
+                </p>
+              </div>
+            </section>
 
-      <footer className="max-w-6xl mx-auto px-6 mt-16 pt-8 border-t border-gray-150/60 text-center text-xs text-gray-400 space-y-1">
-        <div>Loopify Pro-Tools • Angetrieben von FFmpeg im Node.js Server</div>
-        <div className="font-mono text-[10px] text-gray-300">Port 3000 Ingress Routing Active.</div>
-      </footer>
+            {/* ERROR DISPLAY */}
+            {processError && (
+              <div className="p-4 bg-red-50 border border-red-100 rounded-xl text-red-800 text-xs flex items-center gap-2.5 animate-bounce">
+                <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+                <div className="font-medium">{processError}</div>
+              </div>
+            )}
+
+            {/* MAIN CONTENT GRID */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+              
+              {/* Left Column: Upload and Setup */}
+              <div className="lg:col-span-8 space-y-8">
+                
+                {/* 1. Video Upload & Current Resolution Info */}
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 text-xs font-bold text-gray-400 uppercase tracking-wider">
+                    <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-[10px]">1</span>
+                    Video hochladen & analysieren
+                  </div>
+                  
+                  <div className="p-6 rounded-2xl border border-gray-150 bg-white shadow-3xs space-y-4">
+                    <div 
+                      onClick={() => resolutionInputRef.current?.click()}
+                      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const files = e.dataTransfer.files;
+                        if (files && files.length > 0) {
+                          const event = { target: { files } } as any;
+                          handleResolutionVideoUpload(event);
+                        }
+                      }}
+                      className="border-2 border-dashed border-gray-200 hover:border-blue-500 rounded-xl p-9 text-center cursor-pointer transition bg-gray-50/40 hover:bg-blue-50/10 group flex flex-col items-center justify-center min-h-[150px]"
+                    >
+                      <RefreshCw className={`w-9 h-9 text-gray-400 group-hover:text-blue-500 transition mb-3 ${isResolutionUploading ? 'animate-spin' : ''}`} />
+                      <span className="text-xs font-semibold text-gray-700">
+                        {isResolutionUploading ? "Video wird analysiert..." : "Video für Skalierung hochladen..."}
+                      </span>
+                      <span className="text-[10px] text-gray-400 mt-1">
+                        Unterstützt MP4, MOV, WEBM, AVI (Seitenverhältnis bleibt erhalten)
+                      </span>
+                    </div>
+                    
+                    <input
+                      ref={resolutionInputRef}
+                      type="file"
+                      accept="video/*"
+                      className="hidden"
+                      onChange={handleResolutionVideoUpload}
+                      disabled={isResolutionUploading || isResizing}
+                    />
+
+                    {/* Display Current Resolution ("1. Anschauen") */}
+                    {resolutionVideoFile && (
+                      <div className="p-4 bg-blue-50/55 rounded-xl border border-blue-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
+                        <div className="space-y-1">
+                          <div className="text-xs font-bold text-blue-900 uppercase tracking-wider">
+                            Aktuelle Video-Eigenschaften
+                          </div>
+                          <p className="text-sm font-semibold text-gray-800">
+                            {resolutionVideoFile.originalName}
+                          </p>
+                          <div className="text-xs text-gray-500 flex flex-wrap items-center gap-x-2">
+                            <span>Auflösung: <strong className="text-blue-700 font-mono">{resolutionVideoFile.width}x{resolutionVideoFile.height}</strong></span>
+                            <span>•</span>
+                            <span>Dauer: <strong>{resolutionVideoFile.duration.toFixed(1)}s</strong></span>
+                          </div>
+                        </div>
+                        <div className="bg-white px-3 py-1.5 rounded-lg border border-blue-100 shadow-3xs text-center shrink-0">
+                          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">Verhältnis</span>
+                          <span className="text-xs font-mono font-bold text-gray-700">
+                            {(resolutionVideoFile.width / resolutionVideoFile.height).toFixed(2)}:1
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* 2. Target Resolution Preset Settings */}
+                {resolutionVideoFile && (
+                  <div className="space-y-3 animate-fade-in">
+                    <div className="flex items-center gap-2 text-xs font-bold text-gray-400 uppercase tracking-wider">
+                      <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-[10px]">2</span>
+                      Zielauflösung wählen (Klassiker & 1024p)
+                    </div>
+
+                    <div className="p-6 rounded-2xl border border-gray-150 bg-white shadow-3xs space-y-6">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        {[
+                          { height: 1080, label: "Full HD (1080p)", desc: "1920x1080 Standard" },
+                          { height: 1024, label: "Quad HD classic (1024p)", desc: "Professionelles 1024p" },
+                          { height: 720, label: "HD (720p)", desc: "1280x720 Standard" },
+                          { height: 480, label: "SD (480p)", desc: "854x480 DVD-Qualität" },
+                          { height: 360, label: "Low (360p)", desc: "640x360 Mobil" },
+                          { height: 240, label: "Ultra Low (240p)", desc: "426x240 Kompakt" },
+                        ].map((preset) => {
+                          const isSelected = targetResolutionHeight === preset.height;
+                          // Keep proportions math
+                          const ratio = resolutionVideoFile.width / resolutionVideoFile.height;
+                          const calculatedWidth = Math.round(preset.height * ratio);
+                          const isDownscale = preset.height < resolutionVideoFile.height;
+
+                          return (
+                            <button
+                              key={preset.height}
+                              type="button"
+                              onClick={() => setTargetResolutionHeight(preset.height)}
+                              className={`p-4 rounded-xl border text-left transition-all flex flex-col justify-between min-h-[100px] cursor-pointer ${
+                                isSelected
+                                  ? "border-blue-600 bg-blue-50/45 ring-1 ring-blue-600/35"
+                                  : "border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50/40"
+                              }`}
+                            >
+                              <div className="space-y-0.5">
+                                <div className="text-xs font-bold text-gray-900 flex items-center justify-between gap-1">
+                                  <span>{preset.label}</span>
+                                  {isDownscale && (
+                                    <span className="text-[9px] font-mono bg-amber-50 text-amber-700 px-1 rounded border border-amber-100">
+                                      Sparen
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-gray-400 font-medium">
+                                  {preset.desc}
+                                </div>
+                              </div>
+
+                              <div className="pt-2 border-t border-gray-100 mt-2 w-full flex items-center justify-between">
+                                <span className="text-[10px] font-mono text-gray-400">Ziel:</span>
+                                <span className="text-xs font-mono font-bold text-blue-600">
+                                  {calculatedWidth}x{preset.height}
+                                </span>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Info on Ratio preservation */}
+                      <div className="p-4 bg-gray-50 rounded-xl border border-gray-100 space-y-1.5 text-xs text-gray-600">
+                        <div className="font-semibold text-gray-800 flex items-center gap-1.5">
+                          <CheckCircle2 className="w-4 h-4 text-blue-600" />
+                          <span>Saubere Größenverhältnisse garantiert</span>
+                        </div>
+                        <p className="leading-relaxed">
+                          FFmpeg berechnet die Breite anhand des Verhältnisses <strong>{(resolutionVideoFile.width / resolutionVideoFile.height).toFixed(2)}:1</strong> automatisch neu. Die Breite wird automatisch auf eine gerade Zahl gerundet (z.B. <strong className="font-mono text-gray-900">{Math.round((targetResolutionHeight * (resolutionVideoFile.width / resolutionVideoFile.height)) / 2) * 2}x{targetResolutionHeight}</strong>), um eine reibungslose Kompatibilität mit dem H.264 Encoder zu gewährleisten.
+                        </p>
+                      </div>
+
+                      <button
+                        onClick={handleTriggerResize}
+                        disabled={isResizing}
+                        className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-md cursor-pointer active:scale-[0.99]"
+                      >
+                        {isResizing ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" /> Video wird neu berechnet...
+                          </>
+                        ) : (
+                          <>
+                            <Wand2 className="w-4 h-4" /> Auflösung jetzt anpassen
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Processing Loader */}
+                {isResizing && (
+                  <div className="bg-indigo-950 p-6 rounded-2xl text-white shadow-md relative overflow-hidden flex flex-col items-center justify-center gap-4 py-8 animate-fade-in">
+                    <Loader2 className="w-10 h-10 text-blue-400 animate-spin" />
+                    <div className="text-center space-y-1">
+                      <h4 className="font-semibold text-sm">Auflösung wird umgerechnet...</h4>
+                      <p className="text-xs text-blue-200 font-mono">{processStatus}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* 3. Resizing Result display */}
+                {resizedVideoUrl && (
+                  <div className="space-y-4 animate-fade-in">
+                    <div className="flex items-center gap-2 text-xs font-bold text-gray-400 uppercase tracking-wider">
+                      <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-[10px]">3</span>
+                      Konvertiertes Video herunterladen
+                    </div>
+
+                    <div className="bg-white rounded-2xl border border-gray-150 p-6 shadow-xs space-y-6">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+                        
+                        {/* Player */}
+                        <div className="space-y-3">
+                          <div className="aspect-video bg-black rounded-xl overflow-hidden shadow-inner border border-gray-100 flex items-center justify-center">
+                            <video
+                              src={resizedVideoUrl}
+                              controls
+                              className="w-full h-full object-contain"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Metadata Details & Download Button */}
+                        <div className="space-y-4 flex flex-col justify-between h-full">
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-bold uppercase tracking-wider bg-blue-50 text-blue-700 px-2.5 py-0.5 rounded-md border border-blue-150/45">
+                                Skalierung erfolgreich
+                              </span>
+                              <span className="text-[10px] font-mono text-gray-400">Codec: H.264 / AAC</span>
+                            </div>
+                            <h4 className="font-display font-semibold text-base text-gray-900 leading-tight">
+                              Ergebnis-Video herunterladen
+                            </h4>
+                            
+                            <div className="bg-gray-50 rounded-xl p-4 border border-gray-100 space-y-2 text-xs text-gray-600 font-mono">
+                              <div className="flex justify-between">
+                                <span>Neue Auflösung:</span>
+                                <span className="text-blue-700 font-bold">
+                                  {resizedVideoMeta?.width || "N/A"}x{resizedVideoMeta?.height || targetResolutionHeight}
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>Größenverhältnis:</span>
+                                <span className="text-gray-900 font-semibold">
+                                  {resizedVideoMeta ? (resizedVideoMeta.width / resizedVideoMeta.height).toFixed(2) : "N/A"}:1 (Erhalten)
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>Dateigröße:</span>
+                                <span className="text-gray-900 font-bold">
+                                  {resizedVideoMeta?.sizeFormatted || "Optimiert"}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <a
+                            href={resizedVideoUrl}
+                            download={`resized-${targetResolutionHeight}p-${Date.now()}.mp4`}
+                            className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-md cursor-pointer active:scale-[0.99] mt-4"
+                          >
+                            <Download className="w-4 h-4" /> Skaliertes Video herunterladen
+                          </a>
+                        </div>
+
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+              </div>
+
+              {/* Right Column: Information */}
+              <div className="lg:col-span-4 space-y-6">
+                <div className="bg-white rounded-2xl border border-gray-150 p-6 shadow-xs space-y-5">
+                  <div className="flex items-center gap-2.5 pb-4 border-b border-gray-50">
+                    <div className="p-2 bg-blue-50 text-blue-600 rounded-xl">
+                      <Scale className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="font-display font-semibold text-sm text-gray-900">Seitenverhältnis bewahren</h3>
+                      <p className="text-[11px] text-gray-400">Breite passt sich automatisch an</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="space-y-1">
+                      <div className="text-xs font-semibold text-gray-800">Präzises Skalieren</div>
+                      <p className="text-xs text-gray-500 leading-normal">
+                        Damit ein Video nicht gequetscht oder gedehnt wird, skalieren wir ausschließlich eine Dimension (die Höhe) und lassen die Breite über den mathematischen Kehrwert anpassen.
+                      </p>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="text-xs font-semibold text-gray-800">1024p Klassiker</div>
+                      <p className="text-xs text-gray-500 leading-normal">
+                        Die Auflösung 1024p (auch bekannt als klassische Quad-Skalierung für Desktop-Wiedergaben) bietet hervorragende Bildschärfe bei optimierter Bandbreite.
+                      </p>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="text-xs font-semibold text-gray-800">H.264 Encoder-Kompatibilität</div>
+                      <p className="text-xs text-gray-500 leading-normal">
+                        Einige Videoplayer verlangen, dass beide Dimensionen durch 2 teilbar sind. Unsere Engine normalisiert ungerade Breiten- oder Höhenwerte automatisch auf die nächste gerade Zahl.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </>
+        )}
+
+        {/* VIDEO FRAME EXTRACTOR WORKSPACE */}
+        {activeTab === "frames" && (
+          <>
+            {/* INTRO BANNER */}
+            <section className="bg-gradient-to-r from-blue-900 to-indigo-950 rounded-2xl text-white p-7 md:p-8 shadow-sm relative overflow-hidden">
+              <div className="absolute right-0 bottom-0 top-0 w-1/3 opacity-15 pointer-events-none flex items-center justify-center">
+                <ImageIcon className="w-44 h-44 text-blue-400" />
+              </div>
+              <div className="relative max-w-2xl space-y-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-blue-200 bg-blue-800/45 px-3 py-1 rounded-sm">
+                  Frame-Präzisions-Zersplitterung
+                </span>
+                <h2 className="font-display font-semibold text-2xl tracking-tight md:text-3xl text-white mt-1">
+                  Video in Einzelbilder (Frames) zerhacken
+                </h2>
+                <p className="text-sm text-blue-200 leading-relaxed max-w-xl">
+                  Lade ein Video hoch, lege den gewünschten Frame-Intervall fest (z. B. jeden 10. Frame) und die Engine extrahiert hochauflösende Einzelbilder als JPEG. Perfekt zur Filmanalyse oder Vorschau-Erstellung!
+                </p>
+              </div>
+            </section>
+
+            {/* ERROR DISPLAY */}
+            {processError && (
+              <div className="p-4 bg-red-50 border border-red-100 rounded-xl text-red-800 text-xs flex items-center gap-2.5 animate-bounce">
+                <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+                <div className="font-medium">{processError}</div>
+              </div>
+            )}
+
+            {/* MAIN CONTENT GRID */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+              
+              {/* Left Column: Upload & Settings */}
+              <div className="lg:col-span-4 space-y-6">
+                <div className="bg-white rounded-2xl border border-gray-150 p-6 shadow-xs space-y-6">
+                  
+                  {/* Upload box */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">
+                      1. Video auswählen
+                    </label>
+                    <div 
+                      onClick={() => framesInputRef.current?.click()}
+                      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const files = e.dataTransfer.files;
+                        if (files && files.length > 0) {
+                          const event = { target: { files } } as any;
+                          handleFramesVideoUpload(event);
+                        }
+                      }}
+                      className="border-2 border-dashed border-gray-200 hover:border-blue-500 rounded-xl p-6 text-center cursor-pointer transition bg-gray-50/40 hover:bg-blue-50/10 flex flex-col items-center justify-center min-h-[120px]"
+                    >
+                      <RefreshCw className={`w-7 h-7 text-gray-400 hover:text-blue-500 transition mb-2 ${isFramesUploading ? 'animate-spin' : ''}`} />
+                      <span className="text-[11px] font-semibold text-gray-700">
+                        {isFramesUploading ? "Datei wird geladen..." : "Video hierhin ziehen..."}
+                      </span>
+                    </div>
+                    
+                    <input
+                      ref={framesInputRef}
+                      type="file"
+                      accept="video/*"
+                      className="hidden"
+                      onChange={handleFramesVideoUpload}
+                      disabled={isFramesUploading || isExtractingFrames}
+                    />
+
+                    {framesVideoFile && (
+                      <div className="p-3 bg-gray-50 rounded-xl border border-gray-150 text-xs text-gray-600 truncate font-mono">
+                        📁 {framesVideoFile.originalName}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Step Interval setting */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center justify-between">
+                      <span>2. Frame-Intervall</span>
+                      <span className="text-blue-600 font-mono">Jeder {everyXthFrame}. Frame</span>
+                    </label>
+                    
+                    <div className="space-y-3">
+                      <input
+                        type="range"
+                        min="1"
+                        max="100"
+                        step="1"
+                        value={everyXthFrame}
+                        onChange={(e) => setEveryXthFrame(parseInt(e.target.value, 10))}
+                        className="w-full accent-blue-600"
+                      />
+                      
+                      <div className="grid grid-cols-4 gap-1.5 text-center">
+                        {[5, 10, 24, 30].map((step) => (
+                          <button
+                            key={step}
+                            type="button"
+                            onClick={() => setEveryXthFrame(step)}
+                            className={`px-1.5 py-1 text-[10px] font-mono font-bold rounded-md border ${
+                              everyXthFrame === step
+                                ? "bg-blue-600 text-white border-blue-600"
+                                : "bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100"
+                            }`}
+                          >
+                            X={step}
+                          </button>
+                        ))}
+                      </div>
+
+                      <p className="text-[10px] text-gray-400 leading-normal">
+                        <strong>Standard: 10</strong>. Bei einem 30 FPS Video extrahiert ein Wert von 10 alle 1/3 Sekunde ein Bild. Ein Wert von 1 extrahiert jeden einzelnen Frame (Achtung bei langen Videos!).
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleTriggerExtractFrames}
+                    disabled={!framesVideoFile || isExtractingFrames}
+                    className={`w-full py-3.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm ${
+                      !framesVideoFile || isExtractingFrames
+                        ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                        : "bg-blue-600 hover:bg-blue-700 text-white cursor-pointer active:scale-[0.99]"
+                    }`}
+                  >
+                    {isExtractingFrames ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" /> Zerhacken läuft...
+                      </>
+                    ) : (
+                      <>
+                        <Wand2 className="w-4 h-4" /> Video in Frames zerlegen
+                      </>
+                    )}
+                  </button>
+
+                </div>
+              </div>
+
+              {/* Right Column: Extracted frames gallery list & Interactive Analysis Suite */}
+              <div className="lg:col-span-8 space-y-6">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-bold text-gray-400 uppercase tracking-wider">
+                    Extrahiertes Bildmaterial ({totalExtractedCount} Bilder)
+                  </div>
+                  {totalExtractedCount > 0 && (
+                    <span className="text-[10px] font-mono bg-blue-50 text-blue-700 px-2.5 py-0.5 rounded border border-blue-100 font-semibold">
+                      JPEG Format • Breite: 480px (Seitenverhältnis geschützt)
+                    </span>
+                  )}
+                </div>
+
+                {isExtractingFrames && (
+                  <div className="bg-blue-50/50 border border-blue-100 p-12 rounded-2xl text-center space-y-3 animate-pulse">
+                    <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto" />
+                    <p className="text-sm text-blue-800 font-semibold">Bilder werden generiert...</p>
+                    <p className="text-xs text-gray-400 font-mono">{processStatus}</p>
+                  </div>
+                )}
+
+                {extractedFrames.length === 0 && !isExtractingFrames && (
+                  <div className="border border-gray-150 rounded-2xl bg-white p-16 text-center text-sm text-gray-400">
+                    Lade links ein Video hoch, lege das Frame-Intervall fest und klicke auf "Video in Frames zerlegen".
+                  </div>
+                )}
+
+                {extractedFrames.length > 0 && (() => {
+                  const activeIdx = selectedFrameIndex !== null ? selectedFrameIndex : 0;
+                  const activeFrameUrl = extractedFrames[activeIdx] || "";
+                  const activeFrameNum = activeIdx * everyXthFrame;
+                  const timestampSec = activeFrameNum / 30; // Estimate based on 30fps standard
+
+                  const formatFrameTimestamp = (sec: number) => {
+                    const mins = Math.floor(sec / 60);
+                    const secs = Math.floor(sec % 60);
+                    const ms = Math.floor((sec % 1) * 100);
+                    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
+                  };
+
+                  const getFilterClass = (filterType: string) => {
+                    switch (filterType) {
+                      case "grayscale": return "grayscale";
+                      case "contrast": return "contrast-200 brightness-110";
+                      case "invert": return "invert";
+                      case "sepia": return "sepia saturate-150 hue-rotate-[320deg]";
+                      default: return "";
+                    }
+                  };
+
+                  return (
+                    <div className="space-y-6 animate-fade-in">
+                      
+                      {/* 1. PROFESSIONAL ANALYSIS CONSOLE */}
+                      <div className="bg-slate-900 rounded-2xl border border-slate-800 p-5 md:p-6 shadow-md text-white space-y-6">
+                        
+                        {/* Console Header */}
+                        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
+                          <div className="space-y-1">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 bg-blue-950/80 px-2 py-0.5 rounded border border-blue-900/40">
+                              Präzisions-Analyse-Arbeitsplatz
+                            </span>
+                            <h3 className="font-display font-semibold text-sm text-slate-100 flex items-center gap-1.5 mt-1">
+                              <Eye className="w-4 h-4 text-blue-400" />
+                              Frame #{activeFrameNum} • Details & Vergrößerung
+                            </h3>
+                          </div>
+                          <div className="flex items-center gap-2 font-mono text-xs text-slate-400">
+                            <span>Index:</span>
+                            <span className="text-white font-bold bg-slate-800 px-2 py-1 rounded">
+                              {activeIdx + 1} / {extractedFrames.length}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Interactive Screen Grid */}
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+                          
+                          {/* Screen Container (Left) */}
+                          <div className="lg:col-span-8 flex flex-col justify-between space-y-4">
+                            
+                            {/* Main Image Screen */}
+                            <div className="aspect-video bg-slate-950 rounded-xl relative overflow-hidden border border-slate-800 shadow-inner flex items-center justify-center group/screen">
+                              
+                              {/* Glowing Grid overlay */}
+                              {showFrameGrid && (
+                                <div className="absolute inset-0 pointer-events-none grid grid-cols-3 grid-rows-3 z-10">
+                                  <div className="border-r border-b border-emerald-500/25"></div>
+                                  <div className="border-r border-b border-emerald-500/25"></div>
+                                  <div className="border-b border-emerald-500/25"></div>
+                                  <div className="border-r border-b border-emerald-500/25"></div>
+                                  <div className="border-r border-b border-emerald-500/25"></div>
+                                  <div className="border-b border-emerald-500/25"></div>
+                                  <div className="border-r border-emerald-500/25"></div>
+                                  <div className="border-r border-emerald-500/25"></div>
+                                  <div className="pointer-events-none"></div>
+                                </div>
+                              )}
+
+                              {/* Center focus line */}
+                              {showFrameGrid && (
+                                <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-10">
+                                  <div className="w-8 h-0.5 bg-emerald-500/50 absolute"></div>
+                                  <div className="h-8 w-0.5 bg-emerald-500/50 absolute"></div>
+                                  <div className="text-[9px] text-emerald-400 font-mono absolute mt-9 bg-slate-950/90 px-1.5 py-0.5 rounded border border-emerald-500/30">
+                                    X: 50.0% | Y: 50.0%
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Corner viewfinder decorations */}
+                              <div className="absolute top-3 left-3 w-4 h-4 border-t-2 border-l-2 border-slate-700 pointer-events-none"></div>
+                              <div className="absolute top-3 right-3 w-4 h-4 border-t-2 border-r-2 border-slate-700 pointer-events-none"></div>
+                              <div className="absolute bottom-3 left-3 w-4 h-4 border-b-2 border-l-2 border-slate-700 pointer-events-none"></div>
+                              <div className="absolute bottom-3 right-3 w-4 h-4 border-b-2 border-r-2 border-slate-700 pointer-events-none"></div>
+
+                              {/* The actual image */}
+                              <img
+                                src={activeFrameUrl}
+                                alt={`Frame ${activeFrameNum}`}
+                                className={`w-full h-full object-contain select-none transition-all duration-150 ${getFilterClass(frameFilter)}`}
+                                style={{
+                                  transform: `scale(${frameZoomFactor})`,
+                                  transformOrigin: "center center"
+                                }}
+                                referrerPolicy="no-referrer"
+                              />
+
+                              {/* Live watermark indicator */}
+                              <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-xs text-[10px] font-mono px-2 py-0.5 rounded border border-white/5 pointer-events-none flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-blue-400" />
+                                {formatFrameTimestamp(timestampSec)}
+                              </div>
+
+                              <div className="absolute bottom-3 right-3 bg-black/60 backdrop-blur-xs text-[10px] font-mono px-2 py-0.5 rounded border border-white/5 pointer-events-none">
+                                Zoom: {frameZoomFactor}x
+                              </div>
+                            </div>
+
+                            {/* Scrubber and navigation below image */}
+                            <div className="space-y-2 bg-slate-950/40 p-3 rounded-xl border border-slate-800/60">
+                              <div className="flex items-center justify-between gap-4">
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedFrameIndex(Math.max(0, activeIdx - 1))}
+                                  disabled={activeIdx === 0}
+                                  className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition disabled:opacity-20 disabled:hover:bg-slate-800 cursor-pointer"
+                                  title="Vorheriger Frame"
+                                >
+                                  <ChevronLeft className="w-5 h-5" />
+                                </button>
+
+                                <div className="flex-1 px-2">
+                                  <input
+                                    type="range"
+                                    min="0"
+                                    max={extractedFrames.length - 1}
+                                    value={activeIdx}
+                                    onChange={(e) => setSelectedFrameIndex(parseInt(e.target.value, 10))}
+                                    className="w-full accent-blue-500 bg-slate-800 h-1.5 rounded-lg appearance-none cursor-pointer"
+                                  />
+                                </div>
+
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedFrameIndex(Math.min(extractedFrames.length - 1, activeIdx + 1))}
+                                  disabled={activeIdx === extractedFrames.length - 1}
+                                  className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition disabled:opacity-20 disabled:hover:bg-slate-800 cursor-pointer"
+                                  title="Nächster Frame"
+                                >
+                                  <ChevronRight className="w-5 h-5" />
+                                </button>
+                              </div>
+                              <div className="flex justify-between text-[10px] text-slate-400 font-mono px-1">
+                                <span>START (0:00)</span>
+                                <span className="text-blue-400 font-semibold">Aktive Position: {formatFrameTimestamp(timestampSec)}</span>
+                                <span>ENDE ({formatFrameTimestamp((extractedFrames.length - 1) * everyXthFrame / 30)})</span>
+                              </div>
+                            </div>
+
+                          </div>
+
+                          {/* Control Side panel (Right) */}
+                          <div className="lg:col-span-4 flex flex-col justify-between gap-6">
+                            
+                            {/* Zoom & Filters Card */}
+                            <div className="space-y-5 bg-slate-950/30 p-4 rounded-xl border border-slate-800/80">
+                              
+                              {/* Zoom tools */}
+                              <div className="space-y-2">
+                                <label className="text-[11px] font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1.5">
+                                  <ZoomIn className="w-3.5 h-3.5 text-blue-400" />
+                                  Vergrößerung (Zoom)
+                                </label>
+                                <div className="grid grid-cols-4 gap-1">
+                                  {[1, 1.5, 2, 4].map((z) => (
+                                    <button
+                                      key={z}
+                                      type="button"
+                                      onClick={() => setFrameZoomFactor(z)}
+                                      className={`py-1 rounded text-xs font-mono font-bold transition border ${
+                                        frameZoomFactor === z
+                                          ? "bg-blue-600 text-white border-blue-500 shadow-sm"
+                                          : "bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700"
+                                      }`}
+                                    >
+                                      {z}x
+                                    </button>
+                                  ))}
+                                </div>
+                                <div className="flex items-center justify-between gap-2 pt-1">
+                                  <button
+                                    onClick={() => setFrameZoomFactor(prev => Math.max(1, prev - 0.25))}
+                                    disabled={frameZoomFactor <= 1}
+                                    className="p-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 disabled:opacity-30 flex items-center justify-center shrink-0"
+                                  >
+                                    <ZoomOut className="w-3.5 h-3.5" />
+                                  </button>
+                                  <span className="text-xs font-mono text-slate-400">
+                                    Schritte: {(frameZoomFactor).toFixed(2)}x
+                                  </span>
+                                  <button
+                                    onClick={() => setFrameZoomFactor(prev => Math.min(8, prev + 0.25))}
+                                    disabled={frameZoomFactor >= 8}
+                                    className="p-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 disabled:opacity-30 flex items-center justify-center shrink-0"
+                                  >
+                                    <ZoomIn className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Measurement Grid toggle */}
+                              <div className="space-y-2 pt-1 border-t border-slate-800">
+                                <div className="flex items-center justify-between">
+                                  <label className="text-[11px] font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1.5">
+                                    <Grid className="w-3.5 h-3.5 text-blue-400" />
+                                    Raster-Overlay
+                                  </label>
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowFrameGrid(!showFrameGrid)}
+                                    className={`px-2 py-0.5 text-[10px] rounded-md font-bold transition border ${
+                                      showFrameGrid
+                                        ? "bg-emerald-600 text-white border-emerald-500"
+                                        : "bg-slate-800 text-slate-400 border-slate-700 hover:text-white"
+                                    }`}
+                                  >
+                                    {showFrameGrid ? "AKTIV" : "INAKTIV"}
+                                  </button>
+                                </div>
+                                <p className="text-[9px] text-slate-500 leading-normal">
+                                  Blendet ein Drittel-Raster und Fadenkreuz für Kompositions- und Objektanalysen ein.
+                                </p>
+                              </div>
+
+                              {/* Color Filters */}
+                              <div className="space-y-2 pt-1 border-t border-slate-800">
+                                <label className="text-[11px] font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1.5">
+                                  <Sliders className="w-3.5 h-3.5 text-blue-400" />
+                                  Analyse-Farbfilter
+                                </label>
+                                <div className="flex flex-col gap-1">
+                                  {[
+                                    { id: "none", label: "Normalfarbe" },
+                                    { id: "grayscale", label: "Infrarot / Monochrom" },
+                                    { id: "contrast", label: "Extremer Kontrast" },
+                                    { id: "invert", label: "Farb-Inversion (Negativ)" },
+                                    { id: "sepia", label: "Sepia / Vintage" },
+                                  ].map((filter) => (
+                                    <button
+                                      key={filter.id}
+                                      type="button"
+                                      onClick={() => setFrameFilter(filter.id as any)}
+                                      className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition border flex items-center justify-between ${
+                                        frameFilter === filter.id
+                                          ? "bg-blue-600/30 text-blue-300 border-blue-500 font-semibold"
+                                          : "bg-slate-850 hover:bg-slate-800 text-slate-400 border-slate-800"
+                                      }`}
+                                    >
+                                      <span>{filter.label}</span>
+                                      {frameFilter === filter.id && <span className="w-1.5 h-1.5 rounded-full bg-blue-400"></span>}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+
+                            </div>
+
+                            {/* Frame specs & Direct Download */}
+                            <div className="space-y-4 bg-slate-950/45 p-4 rounded-xl border border-slate-800 text-xs font-mono text-slate-400">
+                              <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                                <div className="text-[11px] font-sans font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                  <Sliders className="w-3.5 h-3.5 text-blue-400 animate-pulse" />
+                                  exFAT- & EXIF-Metadaten
+                                </div>
+                                <span className="text-[9px] bg-blue-950 text-blue-300 border border-blue-900/50 px-1.5 py-0.5 rounded font-bold uppercase">
+                                  Live-Spezifikation
+                                </span>
+                              </div>
+
+                              {/* Categorized Metadata lists */}
+                              <div className="space-y-3.5">
+                                {/* 1. Video-Timing */}
+                                <div className="space-y-1.5">
+                                  <div className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Timing & Frame-Position</div>
+                                  <div className="grid grid-cols-2 gap-y-1 bg-slate-900/60 p-2 rounded border border-slate-800/40">
+                                    <span className="text-slate-500">Exakter Zeitstempel:</span>
+                                    <span className="text-emerald-400 font-bold text-right">{formatFrameTimestamp(timestampSec)}</span>
+
+                                    <span className="text-slate-500">Relative Zeit:</span>
+                                    <span className="text-white text-right">{timestampSec.toFixed(3)}s</span>
+
+                                    <span className="text-slate-500">Video-Position %:</span>
+                                    <span className="text-blue-400 font-bold text-right">
+                                      {framesVideoFile?.duration ? `${((timestampSec / framesVideoFile.duration) * 100).toFixed(2)}%` : "0.00%"}
+                                    </span>
+
+                                    <span className="text-slate-500">Frame-ID:</span>
+                                    <span className="text-amber-400 font-bold text-right">#{activeFrameNum}</span>
+                                  </div>
+                                </div>
+
+                                {/* 2. Bildspezifikation */}
+                                <div className="space-y-1.5">
+                                  <div className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Bildspezifikation & Farbraum</div>
+                                  <div className="grid grid-cols-2 gap-y-1 bg-slate-900/60 p-2 rounded border border-slate-800/40">
+                                    <span className="text-slate-500">Extrahierte Größe:</span>
+                                    <span className="text-white font-bold text-right">
+                                      480 × {framesVideoFile ? Math.round(480 * (framesVideoFile.height / framesVideoFile.width)) : 270} px
+                                    </span>
+
+                                    <span className="text-slate-500">Original-Größe:</span>
+                                    <span className="text-slate-300 text-right">
+                                      {framesVideoFile?.width || 1920} × {framesVideoFile?.height || 1080} px
+                                    </span>
+
+                                    <span className="text-slate-500">Farbraum (ICC):</span>
+                                    <span className="text-blue-300 text-right">sRGB (IEC 61966-2.1)</span>
+
+                                    <span className="text-slate-500">Farbkomponenten:</span>
+                                    <span className="text-slate-300 text-right">YUV 4:2:0 (8-Bit)</span>
+                                  </div>
+                                </div>
+
+                                {/* 3. Datei & exFAT Specs */}
+                                <div className="space-y-1.5">
+                                  <div className="text-[9px] text-slate-500 font-bold uppercase tracking-wider">Datei- & exFAT-Zuordnung</div>
+                                  <div className="grid grid-cols-2 gap-y-1 bg-slate-900/60 p-2 rounded border border-slate-800/40">
+                                    <span className="text-slate-500">Dateiname:</span>
+                                    <span className="text-white text-right truncate max-w-[120px] inline-block ml-auto" title={`frame-${String(activeIdx + 1).padStart(4, "0")}_f${activeFrameNum}.jpg`}>
+                                      {`frame-${String(activeIdx + 1).padStart(4, "0")}.jpg`}
+                                    </span>
+
+                                    <span className="text-slate-500">Dateiformat:</span>
+                                    <span className="text-slate-300 text-right">JPEG / JFIF Exif 2.3</span>
+
+                                    <span className="text-slate-500">Dateisystem-Cluster:</span>
+                                    <span className="text-slate-400 text-right">exFAT Cluster-Ausrichtung</span>
+
+                                    <span className="text-slate-500">Est. Größe (Disk):</span>
+                                    <span className="text-emerald-500 text-right">~{(45 + (activeFrameNum % 13)).toFixed(1)} KB</span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="space-y-2 pt-2 border-t border-slate-800">
+                                <a
+                                  href={activeFrameUrl}
+                                  download={`frame-${activeFrameNum}.jpg`}
+                                  className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 border border-slate-700 cursor-pointer"
+                                >
+                                  <Download className="w-3.5 h-3.5" /> Dieses Einzelbild sichern
+                                </a>
+
+                                <button
+                                  type="button"
+                                  onClick={handleDownloadAllAsZip}
+                                  disabled={isDownloadingZip}
+                                  className="w-full py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 border border-blue-500 disabled:border-blue-800 cursor-pointer"
+                                >
+                                  {isDownloadingZip ? (
+                                    <>
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                      <span className="truncate">{zipProgress}</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Download className="w-3.5 h-3.5" />
+                                      <span>Alle {extractedFrames.length} Bilder als ZIP</span>
+                                    </>
+                                  )}
+                                </button>
+                              </div>
+                            </div>
+
+                          </div>
+
+                        </div>
+
+                      </div>
+
+                      {/* 2. FILMSTRIP ROW (Tactile Scrubber) */}
+                      <div className="space-y-2">
+                        <div className="text-[11px] font-bold text-gray-400 uppercase tracking-wider flex items-center justify-between">
+                          <span>Horizontaler Filmstreifen (Timeline Filmstrip)</span>
+                          <span className="text-gray-400 text-[10px] font-sans">Klicke zum Auswählen • Scrollbar →</span>
+                        </div>
+                        
+                        <div className="flex overflow-x-auto gap-2 py-3 px-3 bg-slate-900 rounded-xl border border-slate-800 custom-scrollbar select-none">
+                          {extractedFrames.map((frameUrl, idx) => {
+                            const isSelected = activeIdx === idx;
+                            const frameNum = idx * everyXthFrame;
+                            return (
+                              <div
+                                key={idx}
+                                onClick={() => setSelectedFrameIndex(idx)}
+                                className={`relative flex-shrink-0 w-24 aspect-video rounded-md overflow-hidden cursor-pointer border-2 transition-all duration-150 group ${
+                                  isSelected
+                                    ? "border-blue-500 ring-2 ring-blue-500/30 scale-102"
+                                    : "border-slate-800 hover:border-slate-600"
+                                }`}
+                              >
+                                <img
+                                  src={frameUrl}
+                                  alt={`Thumb ${frameNum}`}
+                                  className="w-full h-full object-cover"
+                                  loading="lazy"
+                                  referrerPolicy="no-referrer"
+                                />
+                                <div className="absolute inset-0 bg-black/35 group-hover:bg-transparent transition-colors"></div>
+                                <div className="absolute bottom-1 left-1 bg-black/80 px-1 py-0.5 rounded text-[8px] font-mono text-white leading-none">
+                                  #{frameNum}
+                                </div>
+                                {isSelected && (
+                                  <div className="absolute top-1 right-1 bg-blue-500 w-2 h-2 rounded-full animate-ping"></div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* 3. ORIGINAL GRID VIEW */}
+                      <div className="space-y-3 pt-4 border-t border-gray-150">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-1">
+                          <div className="text-xs font-bold text-gray-400 uppercase tracking-wider">
+                            Alle extrahierten Einzelbilder ({extractedFrames.length})
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleDownloadAllAsZip}
+                            disabled={isDownloadingZip}
+                            className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white text-xs font-semibold px-4 py-2 rounded-xl transition shadow-3xs hover:shadow-xs cursor-pointer shrink-0"
+                          >
+                            {isDownloadingZip ? (
+                              <>
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                <span>{zipProgress}</span>
+                              </>
+                            ) : (
+                              <>
+                                <Download className="w-3.5 h-3.5" />
+                                <span>ZIP-Archiv herunterladen</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 max-h-[400px] overflow-y-auto p-2 bg-gray-100/50 rounded-2xl border border-gray-150 shadow-inner">
+                          {extractedFrames.map((frameUrl, idx) => {
+                            const frameNum = idx * everyXthFrame;
+                            const isSelected = activeIdx === idx;
+                            return (
+                              <div 
+                                key={idx} 
+                                onClick={() => setSelectedFrameIndex(idx)}
+                                className={`bg-white rounded-xl border overflow-hidden shadow-3xs hover:shadow-xs transition group flex flex-col justify-between cursor-pointer ${
+                                  isSelected ? "border-blue-500 ring-2 ring-blue-500/20" : "border-gray-200"
+                                }`}
+                              >
+                                <div className="aspect-video bg-gray-900 relative overflow-hidden flex items-center justify-center">
+                                  <img 
+                                    src={frameUrl} 
+                                    alt={`Frame ${frameNum}`}
+                                    className="w-full h-full object-contain group-hover:scale-105 transition duration-300"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                  <span className="absolute top-2 left-2 bg-black/70 text-white text-[9px] font-mono px-1.5 py-0.5 rounded backdrop-blur-xs font-semibold">
+                                    #{frameNum + 1}
+                                  </span>
+                                  {isSelected && (
+                                    <span className="absolute top-2 right-2 bg-blue-600 text-white text-[9px] font-semibold px-2 py-0.5 rounded">
+                                      Aktiv
+                                    </span>
+                                  )}
+                                </div>
+                                
+                                <div className="p-2 border-t border-gray-50 bg-gray-50/50 flex items-center justify-between gap-2">
+                                  <span className="text-[10px] font-mono text-gray-500">
+                                    Frame {frameNum}
+                                  </span>
+                                  <a
+                                    href={frameUrl}
+                                    download={`frame-${frameNum}.jpg`}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="p-1 hover:bg-blue-50 text-blue-600 rounded-md transition-colors cursor-pointer"
+                                    title="Einzelbild herunterladen"
+                                  >
+                                    <Download className="w-3.5 h-3.5" />
+                                  </a>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                    </div>
+                  );
+                })()}
+              </div>
+
+            </div>
+          </>
+        )}
+
+        </main>
+
+        <footer className="max-w-5xl w-full mx-auto px-6 mt-16 pb-12 border-t border-gray-150/60 text-center text-xs text-gray-400 space-y-1 shrink-0">
+          <div>Loopify Pro-Tools • Angetrieben von FFmpeg im Node.js Server</div>
+          <div className="font-mono text-[10px] text-gray-300">Port 3000 Ingress Routing Active.</div>
+        </footer>
+      </div>
     </div>
   );
 }

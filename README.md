@@ -1,12 +1,12 @@
-# Loopify Pro-Tools - Nahtloser Video Loop & Audio Mixer
+# Video Susi - Nahtloser Video Loop & Audio Mixer
 
-Dies ist eine leistungsstarke, Full-Stack React-Anwendung (Express + Vite) zur automatisierten Medienverarbeitung. Mit diesem Werkzeug kannst du Bildbereiche aus Videos ausschneiden, Audiospuren extrahieren und extrem flüssige Videoschleifen erzeugen, welche sich automatisch an die gewünschte Audiolänge anpassen.
+Dies ist eine leistungsstarke, Full-Stack React-Anwendung (Express + Vite) zur automatisierten Medienverarbeitung. Mit diesem Werkzeug kannst du Bildbereiche aus Videos ausschneiden, Audiospuren extrahieren, extrem flüssige Videoschleifen erzeugen sowie präzise Einzelbilder extrahieren, deren exFAT-Metadaten analysieren und das gesamte Paket mit einem Klick gesammelt herunterladen.
 
 ---
 
 ## 🚀 Hauptfunktionen
 
-Die Anwendung löst im Detail vier zentrale Medienverarbeitungsschritte:
+Die Anwendung löst im Detail folgende zentrale Medienverarbeitungsschritte:
 
 1. **Räumliches & Zeitliches Zuschneiden (Crop & Trim):**
    * Zeichne interaktiv auf der Weboberfläche eine Begrenzungsbox (`Crop Selection`), um den gewünschten Bildausschnitt millimetergenau festzulegen.
@@ -22,7 +22,12 @@ Die Anwendung löst im Detail vier zentrale Medienverarbeitungsschritte:
    * Damit der Videoschnitt nicht sichtbar ist (keine harten Schnitte oder Sprünge bei der Aneinanderreihung), nutzt die App das **Ping-Pong-Modell**.
    * FFmpeg spiegelt das zugeschnittene Segment und fügt es abwechselnd vorwärts und rückwärts zusammen (`[0:v][1:v]concat=n=2`). Dadurch gleiten Anfang und Ende des Loops nahtlos ineinander über.
 
-5. **Professionelle Videokompression & Stapelverarbeitung (Queue):**
+5. **Fortgeschrittene Video-in-Frames-Zerlegung (Einzelbildextraktion):**
+   * Zerlege das Video vollautomatisch in hochqualitative Einzelbilder (JPEG) basierend auf benutzerdefinierten Intervallen (z.B. jedes 10. Frame).
+   * **ZIP-Archiv-Herunterladen:** Lade alle extrahierten Einzelbilder mit einem einzigen Klick als gezipptes Archiv (`.zip`) herunter. Die Anwendung verpackt die Dateien sequentiell mit klarem Fortschrittsstatus direkt im Browser.
+   * **exFAT- & EXIF-Metadaten-Panel:** Analysiere hochpräzise Frame-Daten wie Bildgröße, exakter Zeitstempel relativ zum Videoanfang, YUV-Farbraum, exFAT Dateisystem-Ausrichtung und geschätzte Clustergröße.
+
+6. **Professionelle Videokompression & Stapelverarbeitung (Queue):**
    * **Starke Speicherreduktion:** Komprimiere riesige GB-Dateien drastisch via Constant Rate Factor (CRF 20/26/32) und intelligentem Downscaling (1080p Full HD, 720p HD, 480p).
    * **Stapelverarbeitung (Queue-Modus):** Lade mehrere Videos gleichzeitig hoch, die vollautomatisch und nacheinander im Hintergrund sequentiell verarbeitet werden.
    * **Eigene Kompressions-Presets:** Speichere häufig verwendete Einstellungen mit individuellem Namen ab (per `localStorage`), um sie für wiederkehrende Workflows mit nur einem Klick abzurufen.
